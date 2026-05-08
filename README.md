@@ -21,3 +21,16 @@ cd disablesleep-toggle
 ```
 
 日志：`/var/log/disablesleep-toggle.log`
+
+### offline-translator
+
+后台跑 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `llama-server`，加载腾讯混元 [HY-MT1.5-1.8B](https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF) 翻译模型，监听 `127.0.0.1:8110`，提供离线 OpenAI 兼容翻译 API。
+
+依赖：`brew install llama.cpp`
+
+```bash
+cd offline-translator
+./install.sh
+```
+
+首次启动会从 HuggingFace 拉取模型（~2GB），后续直接用本地缓存。日志：`/tmp/hy-mt-llama-server.{out,err}.log`。
