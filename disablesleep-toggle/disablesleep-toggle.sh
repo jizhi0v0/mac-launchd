@@ -8,14 +8,16 @@
 #   但该调用在本机环境立即返回非 0, 导致 while 立刻退出, 配合 launchd KeepAlive
 #   每 10s 重启一次脚本, 每次都重写 pmset, 高频 IOPMrootDomain 状态变更触发了
 #   网络栈抖动, 远程控制 (ToDesk) 长连接因此被反复打断.
-# - 仅在状态变化时调用 pmset, 避免无谓刷写. 状态去重后 1s 轮询零开销.
+# - 去重基准是 "系统当前 SleepDisabled 实际值", 不是内存里上次写入值. 因为
+#   macOS 在某些 sleep/wake 周期后会把 SleepDisabled 重置回 0, 若按内存 last
+#   去重, daemon 会自以为 "已经写过 1" 而再也不补, 导致合盖照常 Clamshell Sleep
+#   断网. 按实际值去重既能避免稳态反复刷写, 又能在系统漂移时即时纠错.
 # - 1s 粒度是为了覆盖 "插电后立刻合盖" 场景: 必须在合盖触发 sleep transition
 #   之前把 disablesleep 设为 1, 否则机器会进入 sleep, AC 也救不回来.
 
 set -u
 
 INTERVAL=1
-last=""
 
 current_target() {
     if /usr/bin/pmset -g ps | /usr/bin/head -1 | /usr/bin/grep -q 'AC Power'; then
@@ -25,17 +27,21 @@ current_target() {
     fi
 }
 
+current_actual() {
+    /usr/bin/pmset -g | /usr/bin/awk '/SleepDisabled/{print $2; exit}'
+}
+
 apply() {
-    local target
+    local target actual
     target=$(current_target)
-    if [ "$target" != "$last" ]; then
+    actual=$(current_actual)
+    if [ "$target" != "$actual" ]; then
         /usr/bin/pmset -a disablesleep "$target"
         if [ "$target" = "1" ]; then
-            echo "$(date '+%F %T') AC      -> disablesleep 1"
+            echo "$(date '+%F %T') AC      -> disablesleep 1 (was $actual)"
         else
-            echo "$(date '+%F %T') Battery -> disablesleep 0"
+            echo "$(date '+%F %T') Battery -> disablesleep 0 (was $actual)"
         fi
-        last="$target"
     fi
 }
 
