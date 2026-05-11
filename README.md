@@ -13,7 +13,7 @@
 - 插电（AC）→ `disablesleep 1`，合盖不睡，远程控制不断连
 - 拔电（Battery）→ `disablesleep 0`，合盖正常睡，防止塞包过热
 
-订阅 darwin notification `com.apple.system.powersources.source`，电源切换时秒级响应。
+1 秒轮询电源状态，仅在状态变化时写 `pmset`，避免反复刷写 IOPMrootDomain 触发网络栈抖动。
 
 ```bash
 cd disablesleep-toggle
