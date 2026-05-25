@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jizhi.claude-ssh-prep</string>
+
+  <!-- 占位符 __SCRIPT__ 由 install.sh 替换为绝对路径 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT__</string>
+  </array>
+
+  <!-- 登录 / install 时跑一次保底 -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- desktop 升级 → app.asar 被替换 → 重跑预热 -->
+  <key>WatchPaths</key>
+  <array>
+    <string>/Applications/Claude.app/Contents/Resources/app.asar</string>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/claude-ssh-prep.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-ssh-prep.err.log</string>
+
+  <!-- 跑一次完事，不常驻 -->
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
