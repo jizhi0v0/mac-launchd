@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+# LaunchAgent 子进程的 PATH 默认是 /usr/bin:/bin:/usr/sbin:/sbin，不含
+# Homebrew。显式加上才能找到 zstd（这是 mini 上首次 install 翻车的根因）。
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 ASAR="/Applications/Claude.app/Contents/Resources/app.asar"
 REMOTE_DIR="$HOME/.claude/remote"
 SRV_DIR="$REMOTE_DIR/srv"
