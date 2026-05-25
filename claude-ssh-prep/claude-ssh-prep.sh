@@ -133,14 +133,21 @@ else
   log "installed ssh agent at $SSH_TARGET"
 fi
 
-# ---------- 预热 CLI zst ----------
+# ---------- 预热 CLI binary ----------
+# server 实际 spawn 的是 <cli-dir>/<cli-version> 这个文件本身（无扩展名，已解
+# 压的 Mach-O binary），不是 .zst。strings 自带文档：
+#   "Required CLI version (filename under --cli-dir)"
+# 我们既留 zst 当 cache，也解压出 binary —— 不然 server 自己跑 install 可能
+# 走 short-circuit 跳过解压（实测发生过），后续 spawn binary 就 ENOENT。
 mkdir -p "$CCD_DIR"
 chmod 700 "$CCD_DIR"
-CLI_TARGET="$CCD_DIR/$CLI_VERSION.zst"
+CLI_ZST="$CCD_DIR/$CLI_VERSION.zst"
+CLI_BIN="$CCD_DIR/$CLI_VERSION"
 CLI_URL="https://downloads.claude.ai/claude-code-releases/$CLI_VERSION/$PLATFORM/$CLI_BINARY"
 
-if [ -f "$CLI_TARGET" ] \
-   && [ "$(shasum -a 256 "$CLI_TARGET" | awk '{print $1}')" = "$CLI_CHECKSUM" ]; then
+# zst cache：缺/损坏才重下
+if [ -f "$CLI_ZST" ] \
+   && [ "$(shasum -a 256 "$CLI_ZST" | awk '{print $1}')" = "$CLI_CHECKSUM" ]; then
   log "cli zst up-to-date: $CLI_VERSION"
 else
   log "fetching cli zst $CLI_VERSION ($CLI_URL)"
@@ -151,9 +158,23 @@ else
   ACTUAL=$(shasum -a 256 "$TMP_CLI" | awk '{print $1}')
   [ "$ACTUAL" = "$CLI_CHECKSUM" ] \
     || die "cli zst checksum mismatch (want=$CLI_CHECKSUM got=$ACTUAL)"
-  mv "$TMP_CLI" "$CLI_TARGET"
+  mv "$TMP_CLI" "$CLI_ZST"
   trap - EXIT
-  log "installed cli zst at $CLI_TARGET"
+  log "installed cli zst at $CLI_ZST"
+fi
+
+# binary：解压并保 atomic（先写 tmp 再 mv，避免 server 看到半写文件）
+if [ -x "$CLI_BIN" ] && "$CLI_BIN" --version 2>/dev/null | grep -q "$CLI_VERSION"; then
+  log "cli binary up-to-date: $CLI_VERSION"
+else
+  log "extracting cli binary $CLI_VERSION"
+  TMP_BIN=$(mktemp -t claude-cli.bin.XXXXXX)
+  trap 'rm -f "$TMP_BIN"' EXIT
+  zstd -d -f "$CLI_ZST" -o "$TMP_BIN"
+  chmod 0755 "$TMP_BIN"
+  mv "$TMP_BIN" "$CLI_BIN"
+  trap - EXIT
+  log "installed cli binary at $CLI_BIN"
 fi
 
 log "done"
