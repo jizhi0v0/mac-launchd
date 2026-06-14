@@ -75,7 +75,7 @@ grep -E 'DISCONNECT|RECONNECT' /var/log/anker-charge-monitor.log
 
 为什么从 llama.cpp 换成 MLX:Apple Silicon 上 MLX 走原生 Metal,同量化下比 GGUF 快 ~15-30%、内存更省;实测生成 ~200+ tok/s,常驻内存 ~1.1GB(旧 GGUF Q8_0 是 ~2.7GB)。MLX 拿 Metal GPU 需在用户 GUI 会话里跑,所以这里是 **user LaunchAgent**(登录即起),不再是 system LaunchDaemon。
 
-依赖 [`uv`](https://github.com/astral-sh/uv)。`./install.sh` 会建独立 venv(`~/.local/share/offline-translator/venv`)、装 `mlx-lm`、首次从 HuggingFace 转模型(`tencent/Hy-MT2-1.8B` → 4-bit MLX,~3.6GB 下载),并自动清掉旧版 llama.cpp system daemon(需 sudo)。换机直接 `./install.sh` 一键复现。
+依赖 [`uv`](https://github.com/astral-sh/uv)。`./install.sh` 会建独立 venv(`~/.local/share/offline-translator/venv`)、装 `mlx-lm`、下载预转好的 4-bit MLX 模型([`jizhiovo/Hy-MT2-1.8B-mlx-4bit`](https://huggingface.co/jizhiovo/Hy-MT2-1.8B-mlx-4bit),~974MB,下不到时自动回退到从 `tencent/Hy-MT2-1.8B` 本地转换),并自动清掉旧版 llama.cpp system daemon(需 sudo)。换机直接 `./install.sh` 一键复现,**无需自己转换**。
 
 ---
 

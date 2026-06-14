@@ -11,7 +11,8 @@ SRC="$DIR/${LABEL}.plist"
 APP="$HOME/.local/share/offline-translator"
 VENV="$APP/venv"
 MODEL="$APP/Hy-MT2-1.8B-mlx-4bit"
-HF_REPO="tencent/Hy-MT2-1.8B"
+MLX_REPO="jizhiovo/Hy-MT2-1.8B-mlx-4bit"   # 预转好的 4-bit MLX（直接下，~974MB）
+SRC_REPO="tencent/Hy-MT2-1.8B"             # 原始权重，仅在下载失败时本地转换用
 
 # --- 0. 清掉旧版 llama.cpp system daemon（如果存在，需要 sudo）---
 if [ -f "/Library/LaunchDaemons/${OLD_LABEL}.plist" ]; then
@@ -33,10 +34,15 @@ fi
 echo "installing/updating mlx-lm ..."
 uv pip install -q --python "$VENV/bin/python" mlx-lm
 
-# --- 2. 模型：4-bit MLX，不存在则从 HF 转换（首次 ~3.6GB 下载 + 量化）---
+# --- 2. 模型：优先下预转好的 4-bit MLX（~974MB）；下不到则本地从原始权重转换 ---
 if [ ! -d "$MODEL" ]; then
-    echo "converting $HF_REPO -> 4-bit MLX (first run downloads ~3.6GB) ..."
-    "$VENV/bin/python" -m mlx_lm convert --hf-path "$HF_REPO" -q --q-bits 4 --mlx-path "$MODEL"
+    echo "downloading pre-converted 4-bit MLX model ($MLX_REPO, ~974MB) ..."
+    if ! "$VENV/bin/python" -c "import sys; from huggingface_hub import snapshot_download; \
+         snapshot_download('$MLX_REPO', local_dir='$MODEL')" ; then
+        echo "download failed -> falling back to local conversion from $SRC_REPO (~3.6GB + 量化) ..."
+        rm -rf "$MODEL"
+        "$VENV/bin/python" -m mlx_lm convert --hf-path "$SRC_REPO" -q --q-bits 4 --mlx-path "$MODEL"
+    fi
 fi
 
 # --- 3. 释放 8110（清掉任何残留监听者，含手动起的 mlx/llama-server）---
