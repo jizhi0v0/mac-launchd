@@ -6,7 +6,7 @@
 |---|---|---|---|
 | [disablesleep-toggle](#disablesleep-toggle) | 插电合盖不睡 / 拔电正常睡 | Daemon | `/var/log/disablesleep-toggle.log` |
 | [anker-charge-monitor](#anker-charge-monitor) | 记录充电瞬断 + 断开通知 | Daemon | `/var/log/anker-charge-monitor.log` |
-| [offline-translator](#offline-translator) | 本地 `llama-server` 离线翻译 API | Daemon | `/tmp/hy-mt-llama-server.*.log` |
+| [offline-translator](#offline-translator) | 本地 MLX 离线翻译 API | Agent | `/tmp/offline-translator.*.log` |
 | [claude-ssh-prep](#claude-ssh-prep) | 预热 Claude desktop 的 SSH remote agent | Agent | `/tmp/claude-ssh-prep.*.log` |
 
 安装统一:`cd <模块> && ./install.sh`(Daemon 装到 `/Library/LaunchDaemons`,会要 sudo)。
@@ -71,7 +71,11 @@ grep -E 'DISCONNECT|RECONNECT' /var/log/anker-charge-monitor.log
 
 ## offline-translator
 
-后台跑 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `llama-server`,加载腾讯混元 [HY-MT1.5-1.8B](https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF) 翻译模型,监听 `127.0.0.1:8110`,提供离线 OpenAI 兼容翻译 API。依赖 `brew install llama.cpp`;首次启动从 HuggingFace 拉模型(~2GB),后续走本地缓存。
+后台跑 [MLX](https://github.com/ml-explore/mlx-lm) 的 `mlx_lm.server`,加载腾讯混元 [Hy-MT2-1.8B](https://huggingface.co/tencent/Hy-MT2-1.8B)(转 4-bit MLX)翻译模型,监听 `127.0.0.1:8110`,提供离线 OpenAI 兼容翻译 API(model 名 `Hy-MT2-1.8B-mlx-4bit`)。
+
+为什么从 llama.cpp 换成 MLX:Apple Silicon 上 MLX 走原生 Metal,同量化下比 GGUF 快 ~15-30%、内存更省;实测生成 ~200+ tok/s,常驻内存 ~1.1GB(旧 GGUF Q8_0 是 ~2.7GB)。MLX 拿 Metal GPU 需在用户 GUI 会话里跑,所以这里是 **user LaunchAgent**(登录即起),不再是 system LaunchDaemon。
+
+依赖 [`uv`](https://github.com/astral-sh/uv)。`./install.sh` 会建独立 venv(`~/.local/share/offline-translator/venv`)、装 `mlx-lm`、首次从 HuggingFace 转模型(`tencent/Hy-MT2-1.8B` → 4-bit MLX,~3.6GB 下载),并自动清掉旧版 llama.cpp system daemon(需 sudo)。换机直接 `./install.sh` 一键复现。
 
 ---
 
