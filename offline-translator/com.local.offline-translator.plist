@@ -19,6 +19,8 @@
         <string>127.0.0.1</string>
         <string>--port</string>
         <string>8110</string>
+        <string>--log-level</string>
+        <string>WARNING</string>
     </array>
 
     <!-- 用相对的 --model，配合这个 WorkingDirectory，让服务端注册的 model id
