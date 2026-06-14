@@ -14,12 +14,17 @@
         <string>mlx_lm</string>
         <string>server</string>
         <string>--model</string>
-        <string>__HOME__/.local/share/offline-translator/Hy-MT2-1.8B-mlx-4bit</string>
+        <string>Hy-MT2-1.8B-mlx-4bit</string>
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--port</string>
         <string>8110</string>
     </array>
+
+    <!-- 用相对的 --model，配合这个 WorkingDirectory，让服务端注册的 model id
+         就是干净的 "Hy-MT2-1.8B-mlx-4bit"（不含绝对路径/用户名，跨机器通用）。 -->
+    <key>WorkingDirectory</key>
+    <string>__HOME__/.local/share/offline-translator</string>
 
     <key>EnvironmentVariables</key>
     <dict>
