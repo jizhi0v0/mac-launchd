@@ -10,8 +10,10 @@ SRC="$DIR/${LABEL}.plist"
 
 APP="$HOME/.local/share/offline-translator"
 VENV="$APP/venv"
-MODEL="$APP/Hy-MT2-1.8B-mlx-4bit"
-MLX_REPO="jizhiovo/Hy-MT2-1.8B-mlx-4bit"   # 预转好的 4-bit MLX（直接下，~974MB）
+MODEL_DIR_NAME="Hy-MT2-1.8B-mlx-8bit"
+MODEL="$APP/$MODEL_DIR_NAME"
+LINK="$APP/Hy-MT2-1.8B"                     # 中性 model id：软链 -> 当前量化目录，与量化解耦
+MLX_REPO="mlx-community/Hy-MT2-1.8B-8bit"   # 预量化 8-bit MLX（~1.8GB）
 SRC_REPO="tencent/Hy-MT2-1.8B"             # 原始权重，仅在下载失败时本地转换用
 
 # --- 0. 清掉旧版 llama.cpp system daemon（如果存在，需要 sudo）---
@@ -34,16 +36,35 @@ fi
 echo "installing/updating mlx-lm ..."
 uv pip install -q --python "$VENV/bin/python" mlx-lm
 
-# --- 2. 模型：优先下预转好的 4-bit MLX（~974MB）；下不到则本地从原始权重转换 ---
-if [ ! -d "$MODEL" ]; then
-    echo "downloading pre-converted 4-bit MLX model ($MLX_REPO, ~974MB) ..."
-    if ! "$VENV/bin/python" -c "import sys; from huggingface_hub import snapshot_download; \
-         snapshot_download('$MLX_REPO', local_dir='$MODEL')" ; then
-        echo "download failed -> falling back to local conversion from $SRC_REPO (~3.6GB + 量化) ..."
+# --- 2. 模型：curl 直连 resolve 下 8-bit MLX（绕开 hf 的 Xet 通道——实测会卡 0B）。
+#         下不全则本地从原始权重转换。 ---
+if [ ! -f "$MODEL/model.safetensors" ]; then
+    echo "downloading 8-bit MLX model ($MLX_REPO, ~1.8GB) via curl ..."
+    mkdir -p "$MODEL"
+    BASE="https://huggingface.co/$MLX_REPO/resolve/main"
+    FILES=$("$VENV/bin/python" - "$MLX_REPO" <<'PY'
+import sys
+from huggingface_hub import HfApi
+print("\n".join(f.rfilename for f in HfApi().model_info(sys.argv[1]).siblings))
+PY
+)
+    ok=1
+    for f in $FILES; do
+        case "$f" in */*) continue;; esac          # 只要顶层模型文件，跳过 imgs/ 等
+        echo "  - $f"
+        curl -fSL -C - --retry 8 --retry-delay 3 "$BASE/$f" -o "$MODEL/$f" || ok=0
+    done
+    # 校验权重头部，半截文件视为失败
+    "$VENV/bin/python" -c "import struct,json; f=open('$MODEL/model.safetensors','rb'); n=struct.unpack('<Q',f.read(8))[0]; json.loads(f.read(n))" 2>/dev/null || ok=0
+    if [ $ok -ne 1 ]; then
+        echo "curl download incomplete -> falling back to local conversion from $SRC_REPO (~3.6GB + 量化) ..."
         rm -rf "$MODEL"
-        "$VENV/bin/python" -m mlx_lm convert --hf-path "$SRC_REPO" -q --q-bits 4 --mlx-path "$MODEL"
+        "$VENV/bin/python" -m mlx_lm convert --hf-path "$SRC_REPO" -q --q-bits 8 --mlx-path "$MODEL"
     fi
 fi
+
+# 中性 id 软链（plist 里 --model 用的就是它；以后换量化只改这条软链指向，客户端不用动）
+ln -sfn "$MODEL_DIR_NAME" "$LINK"
 
 # --- 3. 释放 8110（清掉任何残留监听者，含手动起的 mlx/llama-server）---
 for pid in $(lsof -nP -iTCP:8110 -sTCP:LISTEN -t 2>/dev/null || true); do
@@ -63,5 +84,5 @@ launchctl bootstrap "gui/$UID" "$PLIST"
 launchctl kickstart -k "gui/$UID/$LABEL" 2>/dev/null || true
 
 echo "installed as user LaunchAgent (MLX / Metal, starts at login)"
-echo "endpoint: http://127.0.0.1:8110/v1   model name: Hy-MT2-1.8B-mlx-4bit"
+echo "endpoint: http://127.0.0.1:8110/v1   model name: Hy-MT2-1.8B"
 echo "logs: /tmp/offline-translator.{out,err}.log"

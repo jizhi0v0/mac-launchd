@@ -14,7 +14,7 @@
         <string>mlx_lm</string>
         <string>server</string>
         <string>--model</string>
-        <string>Hy-MT2-1.8B-mlx-4bit</string>
+        <string>Hy-MT2-1.8B</string>
         <string>--host</string>
         <string>127.0.0.1</string>
         <string>--port</string>
@@ -23,8 +23,9 @@
         <string>WARNING</string>
     </array>
 
-    <!-- 用相对的 --model，配合这个 WorkingDirectory，让服务端注册的 model id
-         就是干净的 "Hy-MT2-1.8B-mlx-4bit"（不含绝对路径/用户名，跨机器通用）。 -->
+    <!-- 中性 model id "Hy-MT2-1.8B"：实为软链，指向当前量化目录(现 Hy-MT2-1.8B-mlx-8bit)。
+         相对 --model + WorkingDirectory 让注册 id 干净、跨机器通用；与量化解耦——
+         以后换 4bit/8bit 只改软链指向，客户端(Bob/扩展)的 model 字段不用动。 -->
     <key>WorkingDirectory</key>
     <string>__HOME__/.local/share/offline-translator</string>
 
