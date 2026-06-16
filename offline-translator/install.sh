@@ -10,10 +10,10 @@ SRC="$DIR/${LABEL}.plist"
 
 APP="$HOME/.local/share/offline-translator"
 VENV="$APP/venv"
-MODEL_DIR_NAME="Hy-MT2-1.8B-mlx-8bit"
+MODEL_DIR_NAME="Hy-MT2-1.8B-mlx-4bit"
 MODEL="$APP/$MODEL_DIR_NAME"
 LINK="$APP/Hy-MT2-1.8B"                     # 中性 model id：软链 -> 当前量化目录，与量化解耦
-MLX_REPO="mlx-community/Hy-MT2-1.8B-8bit"   # 预量化 8-bit MLX（~1.8GB）
+MLX_REPO="jizhiovo/Hy-MT2-1.8B-mlx-4bit"   # 预量化 4-bit MLX（~977MB）
 SRC_REPO="tencent/Hy-MT2-1.8B"             # 原始权重，仅在下载失败时本地转换用
 
 # --- 0. 清掉旧版 llama.cpp system daemon（如果存在，需要 sudo）---
@@ -36,10 +36,10 @@ fi
 echo "installing/updating mlx-lm ..."
 uv pip install -q --python "$VENV/bin/python" mlx-lm
 
-# --- 2. 模型：curl 直连 resolve 下 8-bit MLX（绕开 hf 的 Xet 通道——实测会卡 0B）。
+# --- 2. 模型：curl 直连 resolve 下 4-bit MLX（绕开 hf 的 Xet 通道——实测会卡 0B）。
 #         下不全则本地从原始权重转换。 ---
 if [ ! -f "$MODEL/model.safetensors" ]; then
-    echo "downloading 8-bit MLX model ($MLX_REPO, ~1.8GB) via curl ..."
+    echo "downloading 4-bit MLX model ($MLX_REPO, ~977MB) via curl ..."
     mkdir -p "$MODEL"
     BASE="https://huggingface.co/$MLX_REPO/resolve/main"
     FILES=$("$VENV/bin/python" - "$MLX_REPO" <<'PY'
@@ -59,7 +59,7 @@ PY
     if [ $ok -ne 1 ]; then
         echo "curl download incomplete -> falling back to local conversion from $SRC_REPO (~3.6GB + 量化) ..."
         rm -rf "$MODEL"
-        "$VENV/bin/python" -m mlx_lm convert --hf-path "$SRC_REPO" -q --q-bits 8 --mlx-path "$MODEL"
+        "$VENV/bin/python" -m mlx_lm convert --hf-path "$SRC_REPO" -q --q-bits 4 --mlx-path "$MODEL"
     fi
 fi
 

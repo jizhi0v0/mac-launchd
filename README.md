@@ -72,15 +72,15 @@ grep -E 'DISCONNECT|RECONNECT' /var/log/anker-charge-monitor.log
 
 ## offline-translator
 
-后台跑 [MLX](https://github.com/ml-explore/mlx-lm) 的 `mlx_lm.server`,加载腾讯混元 [Hy-MT2-1.8B](https://huggingface.co/tencent/Hy-MT2-1.8B)(**8-bit MLX**)翻译模型,监听 `127.0.0.1:8110`,提供离线 OpenAI 兼容翻译 API。**对外 model 名是中性的 `Hy-MT2-1.8B`**(实为软链 → 当前量化目录 `Hy-MT2-1.8B-mlx-8bit`):与量化解耦,以后换 4bit/8bit 只改软链指向,Bob/浏览器扩展里的 model 字段不用动。
+后台跑 [MLX](https://github.com/ml-explore/mlx-lm) 的 `mlx_lm.server`,加载腾讯混元 [Hy-MT2-1.8B](https://huggingface.co/tencent/Hy-MT2-1.8B)(**4-bit MLX**)翻译模型,监听 `127.0.0.1:8110`,提供离线 OpenAI 兼容翻译 API。**对外 model 名是中性的 `Hy-MT2-1.8B`**(实为软链 → 当前量化目录 `Hy-MT2-1.8B-mlx-4bit`):与量化解耦,换量化只改软链指向,客户端 model 字段不用动。
 
 为什么从 llama.cpp 换成 MLX:Apple Silicon 上 MLX 走原生 Metal、内存更省,且在用户 GUI 会话里才拿得到 Metal GPU,所以是 **user LaunchAgent**(登录即起)而非 system LaunchDaemon。
 
-为什么用 8-bit:旧 llama.cpp 跑的是 `HY-MT1.5 Q8_0`(8-bit,~3GB)。一度切到 MT2 **4-bit**(footprint ~1.4GB),但实测中英对比发现 4-bit 在网络梗/罕见术语上偶有轻微错译(如"真香"→"effective"、"dock tile"→"瓷砖"),官方也标注 1.8B 的 Int4 有可感知精度下降。故定 **8-bit**(footprint ~2.1GB,仍 < 旧 3GB,延迟亚秒),质量贴近旧 Q8。
+为什么用 4-bit(权衡过 8-bit):旧 llama.cpp 是 `HY-MT1.5 Q8_0`(8-bit,~3GB)。MT2 上 4bit/8bit 实测对比——质量差异很小(8bit 仅在网络梗/罕见术语上略好,如"真香"、"dock tile");但**重并发整页翻译**下内存差距明显:**8bit 稳态 ~3.3GB / 峰值 ~5.4GB,4bit 稳态 ~1.3GB / 峰值 ~2.5GB**(峰值大头是并发请求的 KV/计算缓冲,非权重)。综合取 **4-bit**:质量够用、内存省一截、速度还快 ~20-30%(都亚秒)。
 
-> ⚠️ mlx_lm.server 会按请求里的 `model` 字段**动态加载**对应模型——所以客户端必须发中性 id `Hy-MT2-1.8B`(或留空),发别的名字会触发重载甚至 404。
+> ⚠️ 两个坑:① `mlx_lm.server` 按请求 `model` 字段**动态加载**模型——发未知名会 404、发别的本地目录名会去加载那个。中性软链 + 真目录名(`Hy-MT2-1.8B-mlx-4bit`)同realpath,客户端发中性 id 或旧的 `-mlx-4bit` 名都解析到同一模型、不触发重载。② `mlx-community/*` 等仓是 Xet 存储,`hf`/`snapshot_download` 会卡 0B,故用 curl 直连 `…/resolve/main/<file>`。
 
-依赖 [`uv`](https://github.com/astral-sh/uv)。`./install.sh` 会建独立 venv、装 `mlx-lm`、用 **curl 直连 resolve** 下 8-bit MLX([`mlx-community/Hy-MT2-1.8B-8bit`](https://huggingface.co/mlx-community/Hy-MT2-1.8B-8bit),~1.8GB——绕开 hf 的 Xet 通道,实测它会卡 0B;下不全则回退到从 `tencent/Hy-MT2-1.8B` 本地 `--q-bits 8` 转换)、建中性软链,并清掉旧版 llama.cpp system daemon(需 sudo)。换机 `./install.sh` 一键复现。
+依赖 [`uv`](https://github.com/astral-sh/uv)。`./install.sh` 会建独立 venv、装 `mlx-lm`、用 **curl 直连 resolve** 下 4-bit MLX([`jizhiovo/Hy-MT2-1.8B-mlx-4bit`](https://huggingface.co/jizhiovo/Hy-MT2-1.8B-mlx-4bit),~977MB;下不全则回退到从 `tencent/Hy-MT2-1.8B` 本地 `--q-bits 4` 转换)、建中性软链,并清掉旧版 llama.cpp system daemon(需 sudo)。换机 `./install.sh` 一键复现。
 
 ---
 
