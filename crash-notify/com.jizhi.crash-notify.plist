@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jizhi.crash-notify</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bobby/Developer/github/mac-launchd/crash-notify/crash-notify.sh</string>
+    </array>
+
+    <!-- 这些目录任一发生变化(新崩溃报告 / 新 dump)就跑一次脚本。
+         新增私有 dump 目录时,记得同步加到这里并加到 crash-notify.sh 的 CN_DUMP_DIRS。 -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/bobby/Library/Logs/DiagnosticReports</string>
+        <string>/Library/Logs/DiagnosticReports</string>
+        <string>/Library/Application Support/ToDesk/dumps</string>
+    </array>
+
+    <!-- 事件驱动,不常驻;崩溃循环时 launchd 把触发节流到最快每 10s 一次 -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bobby/Library/Logs/crash-notify.err</string>
+</dict>
+</plist>

@@ -8,6 +8,7 @@
 | [anker-charge-monitor](#anker-charge-monitor) | 记录充电瞬断 + 断开通知 | Daemon | `/var/log/anker-charge-monitor.log` |
 | [offline-translator](#offline-translator) | 本地 MLX 离线翻译 API | Agent | `/tmp/offline-translator.*.log` |
 | [claude-ssh-prep](#claude-ssh-prep) | 预热 Claude desktop 的 SSH remote agent | Agent | `/tmp/claude-ssh-prep.*.log` |
+| [crash-notify](#crash-notify) | 监听崩溃报告 + 私有 dump,新崩溃弹本地横幅 | Agent | `~/Library/Logs/crash-notify.log` |
 
 安装统一:`cd <模块> && ./install.sh`(Daemon 装到 `/Library/LaunchDaemons`,会要 sudo)。
 
@@ -259,3 +260,38 @@ fi
 **威胁模型小结**:部署清单已默认含 passphrase + Keychain + sshd 关密码登录(A、B 基础)。重视隐私加 C(Tailscale ACL),公网 SSH 加 D(带外验证 host key),对 SSH 横向移动敏感加 E(proxy env 限定 source IP)。F 是任何情况都必须遵守的红线。
 
 </details>
+
+---
+
+## crash-notify
+
+监听 macOS 崩溃报告 + 指定私有 dump 目录,有新崩溃就弹**本地通知横幅**(`terminal-notifier`)。LaunchAgent,由 `WatchPaths` 触发——被监听目录一变才跑一次,常驻零开销;纯用户级,免 sudo,脚本直接从仓库路径跑。
+
+**覆盖两类崩溃:**
+
+| 类型 | 来源 | 例子 |
+|---|---|---|
+| 走系统崩溃报告的 app | `~/Library/Logs/DiagnosticReports/*.ips`、`/Library/Logs/DiagnosticReports/*.ips` | Codex、绝大多数原生 app |
+| 自带崩溃处理器(Breakpad/Crashpad)的 app | 各自私有 dump 目录(`CN_DUMP_DIRS` 配置) | ToDesk(`/Library/Application Support/ToDesk/dumps/*.dmp`) |
+
+> ⚠️ 自带崩溃处理器的 app **不进** DiagnosticReports(自己拦信号写私有 dump),所以必须显式把其 dump 目录加进来才抓得到。
+
+**防崩溃循环刷屏**(吃过 ToDesk 每 10s 崩一次、能弹几百条的亏):
+
+- 同一进程两条横幅最短间隔 `CN_COOLDOWN`(默认 300s),冷却内仍记日志、不弹横幅;
+- 单次扫描内同进程崩溃数 ≥ `CN_LOOP_THRESHOLD`(默认 5)判为**崩溃循环**,合并成一条 `💥 X 崩溃循环` 横幅;
+- `WatchPaths` 触发由 launchd 节流到最快每 10s 一次(`ThrottleInterval`);
+- `fcntl` 文件锁,并发触发只让一个实例处理,杜绝重复通知。
+
+**安装即打基线**:`install.sh` 会先 `crash-notify.sh seed` 把现有崩溃全标记为已读,只通知此后的新崩溃,不补报历史。
+
+**新增要监听的私有 dump 目录**:在 `crash-notify.sh` 的 `CN_DUMP_DIRS` 加一行 `目录|显示名|扩展名`,**并**把同一目录加到 `com.jizhi.crash-notify.plist` 的 `WatchPaths`(否则不会被触发)。
+
+```
+安装:  cd crash-notify && ./install.sh
+自测:  /opt/homebrew/bin/terminal-notifier -title '💥 测试' -message ok
+日志:  tail -f ~/Library/Logs/crash-notify.log
+卸载:  ./uninstall.sh
+```
+
+**已知局限**:Codex 这类崩在系统宿主进程里的(`com.apple.dock.external.extra`),横幅显示的是宿主进程名而非真正肇事 app —— 详情看日志 / `.ips` 里的 faulting image。
