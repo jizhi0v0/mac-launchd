@@ -9,6 +9,7 @@
 | [offline-translator](#offline-translator) | 本地 MLX 离线翻译 API | Agent | `/tmp/offline-translator.*.log` |
 | [claude-ssh-prep](#claude-ssh-prep) | 预热 Claude desktop 的 SSH remote agent | Agent | `/tmp/claude-ssh-prep.*.log` |
 | [crash-notify](#crash-notify) | 监听崩溃报告 + 私有 dump,新崩溃弹本地横幅 | Agent | `~/Library/Logs/crash-notify.log` |
+| [claude-wake](#claude-wake) | 远程唤醒一个全新 claude RC 会话(远控逃生舱) | Agent | `/tmp/claude-wake.*.log` |
 
 安装统一:`cd <模块> && ./install.sh`(Daemon 装到 `/Library/LaunchDaemons`,会要 sudo)。
 
@@ -299,3 +300,43 @@ fi
 ```
 
 **已知局限**:Codex 这类崩在系统宿主进程里的(`com.apple.dock.external.extra`),横幅显示的是宿主进程名而非真正肇事 app —— 详情看日志 / `.ips` 里的 faulting image。
+
+---
+
+## claude-wake
+
+远控**逃生舱**:本机常驻一个**只听 127.0.0.1 的小触发器**,远端戳一下就**现起一个全新的** `claude --remote-control` 会话,把 `claude.ai/code` 接管链接回给你 —— 点开就在 App / 网页端控制。
+
+**为什么是「唤醒」而不是「常驻一个会话」**:RC 是一条**活的云连接**,网络抖动会把它打断进 archived 态 —— 常驻会话于是变僵尸、抓不回来,人又被锁在门外。改成**每次现起一个全新会话**:全新连接,没有陈旧断链问题。而触发器本身**不持有云连接**(只是被 tailscale/surge 转进来的一次性本地调用),所以抖动锁不住它 —— 哪怕一个 RC 会话都没有,触发器永远在。
+
+**链路**:`tailscale serve` 把 `https://<主机>.<tailnet>.ts.net/` 用 HTTPS 暴露到你自己的 tailnet(**仅本人设备可达**),再叠一层 token。**Surge ponte 作后备**(tailscale 挂了时):把 ponte 指到 `127.0.0.1:8765`,带同样 token 访问。RC 本身走 Anthropic 云,这俩只是「到机器」的链路冗余。
+
+**机制**:`claude --remote-control` 要 PTY,launchd/代理裸 spawn 没 TTY → 塞进 **tmux**。每次 wake 先 `reap`(收掉上一个可能已断的会话)再 spawn 全新的,然后盯 pane 抓出 `claude.ai/code/session_…` 链接返回。代理同 [claude-ssh-prep](#claude-ssh-prep):LaunchAgent 子进程不继承 shell 的 proxy env,从 `scutil` 读系统级 HTTPS 代理补上(每次 spawn 重读,跟随换网),否则 RC 注册报 "Session creation failed"。
+
+**鉴权 / 安全**:
+- **唤醒只走 POST** —— `GET /` 只回一个落地页(带「唤醒」按钮),**没有副作用**。所以在浏览器里直接打开 URL(书签被重开 / 预取 / 历史缩略图刷新 / 链接预览)都**不会**误起 RC 会话;必须显式点按钮或用 Shortcut 发 POST 才 spawn。
+- listener 只绑 `127.0.0.1`(不上局域网);除 `/health` 外都要 token(`Authorization: Bearer` / `?token=` / 表单字段,常数时间比对);token 48 hex(192-bit)存 `~/.config/claude-wake/token`(chmod 600)。
+- `dir` 参数过 `[ -d ]` 校验、只进 `tmux -c`(不拼进命令串,无注入)。
+- 会话**不带** `--dangerously-skip-permissions` —— 就算别人拿 token 戳出会话,也得用**你账号登录的 App** 才能驱动,且每步权限你还得点。
+
+**可调**(plist `EnvironmentVariables` / `WAKE_PORT` 等 export 覆盖):
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `WAKE_PORT` | `8765` | listener 端口(tailscale serve / ponte 指这里) |
+| `WAKE_DIR` | `$HOME` | 新会话起始目录(`?dir=` 可单次覆盖) |
+| `WAKE_RC_NAME` | `wake-<LocalHostName>` | App 里显示的会话名 |
+| `WAKE_SESSION` | `wake` | tmux 会话名 |
+| `WAKE_CAPTURE_TIMEOUT` | `25` | 等 RC 链接出现的秒数 |
+
+```
+安装:    cd claude-wake && ./install.sh   # 生成 token + 配 tailscale serve,打印唤醒 URL
+本地测:  curl -s -X POST -d "token=$(cat ~/.config/claude-wake/token)" http://127.0.0.1:8765/wake
+手机唤醒: 浏览器开 https://<主机>.<tailnet>.ts.net/?token=<token> → 点「唤醒」按钮 → 点返回链接接管
+         （或 Shortcut: POST /wake + header Authorization: Bearer <token>,token 不进 URL）
+路由:    GET / 落地页(无副作用) · POST /wake[?dir=] 起会话 · GET /status 看当前 · GET /health 探活(免 token)
+换 token: rm ~/.config/claude-wake/token && ./install.sh
+卸载:    ./uninstall.sh   # 撤 tailscale serve + 收掉 wake 会话(token 保留)
+```
+
+**已知局限**:① token 放 query 会进浏览器历史/可能进日志 —— 在意就用 Shortcut 走 `Authorization` header。② `uninstall.sh` 撤 serve 用 `tailscale serve --https=443 off`,不行则 `reset`(会清掉**所有** serve 映射);本仓库装它时 serve 本是空的,若你后来加过别的映射,卸载后核对一下 `tailscale serve status`。③ Surge ponte 那一路是 app 配置,脚本不替你配。

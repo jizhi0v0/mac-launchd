@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jizhi.claude-wake</string>
+
+  <!-- 占位符由 install.sh 替换为绝对路径 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__SERVER__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>WAKE_SH</key>
+    <string>__WAKESH__</string>
+    <key>WAKE_PORT</key>
+    <string>__PORT__</string>
+    <key>WAKE_TOKEN_FILE</key>
+    <string>__TOKEN__</string>
+  </dict>
+
+  <!-- 登录即起；listener 该一直在，崩了 launchd 兜底重起 -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/claude-wake.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-wake.err.log</string>
+</dict>
+</plist>
