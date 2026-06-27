@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jizhi.claude-wake-tokencheck</string>
+
+  <!-- 占位符由 install.sh 替换为绝对路径 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CHECK__</string>
+  </array>
+
+  <!-- 每天 10:00 跑一次；漏跑（关机/睡眠）launchd 会在唤醒后补跑 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- 登录也顺手查一次；脚本自带冷却，不会刷屏 -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-wake-tokencheck.err.log</string>
+</dict>
+</plist>

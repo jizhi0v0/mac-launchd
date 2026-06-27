@@ -313,6 +313,8 @@ fi
 
 **机制**:`claude --remote-control` 要 PTY,launchd/代理裸 spawn 没 TTY → 塞进 **tmux**。每次 wake 先 `reap`(收掉上一个可能已断的会话)再 spawn 全新的,然后盯 pane 抓出 `claude.ai/code/session_…` 链接返回。代理同 [claude-ssh-prep](#claude-ssh-prep):LaunchAgent 子进程不继承 shell 的 proxy env,从 `scutil` 读系统级 HTTPS 代理补上(每次 spawn 重读,跟随换网),否则 RC 注册报 "Session creation failed"。
 
+**凭据(给 claude 自己用的,不是门锁 token)**:wake 会话默认**继承本机交互登录态**(`~/.claude/.credentials.json` 的 OAuth),但那个 access token 几小时就过期,靠 `refreshToken` 静默续 —— **refreshToken 一旦失效**(别处重登 / 改密 / 服务端轮转)**下一次 wake 就要交互 `/login`,而 RC 会话没法交互 → 逃生舱在你不在时正好挂掉**。所以可选注入一个**长效 token**(`claude setup-token` 签,约 1 年免续):写进 `~/.config/claude-wake/oauth-token`(chmod 600),spawn 时透传成 `CLAUDE_CODE_OAUTH_TOKEN`,claude 改用它、和本机交互登录态彻底解耦。代价:这是张长效持票凭据,泄了等于交出账号约一年 —— 别进 plist 明文 / git,到期记得重签。没配这个文件就静默退回继承登录态。
+
 **鉴权 / 安全**:
 - **唤醒只走 POST** —— `GET /` 只回一个落地页(带「唤醒」按钮),**没有副作用**。所以在浏览器里直接打开 URL(书签被重开 / 预取 / 历史缩略图刷新 / 链接预览)都**不会**误起 RC 会话;必须显式点按钮或用 Shortcut 发 POST 才 spawn。
 - listener 只绑 `127.0.0.1`(不上局域网);除 `/health` 外都要 token(`Authorization: Bearer` / `?token=` / 表单字段,常数时间比对);token 48 hex(192-bit)存 `~/.config/claude-wake/token`(chmod 600)。
@@ -327,7 +329,8 @@ fi
 | `WAKE_DIR` | `$HOME` | 新会话起始目录(`?dir=` 可单次覆盖) |
 | `WAKE_RC_NAME` | `wake-<LocalHostName>` | App 里显示的会话名 |
 | `WAKE_SESSION` | `wake` | tmux 会话名 |
-| `WAKE_CAPTURE_TIMEOUT` | `25` | 等 RC 链接出现的秒数 |
+| `WAKE_CAPTURE_TIMEOUT` | `45` | 等 RC 链接出现的秒数 |
+| `WAKE_OAUTH_FILE` | `~/.config/claude-wake/oauth-token` | 长效 `CLAUDE_CODE_OAUTH_TOKEN` 来源(`claude setup-token` 签);缺省退回继承本机登录态 |
 
 ```
 安装:    cd claude-wake && ./install.sh   # 生成 token + 配 tailscale serve,打印唤醒 URL
@@ -335,6 +338,8 @@ fi
 手机唤醒: 浏览器开 https://<主机>.<tailnet>.ts.net/?token=<token> → 点「唤醒」按钮 → 点返回链接接管
          （或 Shortcut: POST /wake + header Authorization: Bearer <token>,token 不进 URL）
 路由:    GET / 落地页(无副作用) · POST /wake[?dir=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库(给快捷指令选文件夹) · GET /status 看当前 · GET /health 探活(免 token)
+长效凭据: claude setup-token  → umask 077; printf '%s' '<token>' > ~/.config/claude-wake/oauth-token  (无人值守必备,免 refreshToken 失效后人肉重登)
+到期提醒: install.sh 顺带装第二个 agent(com.jizhi.claude-wake-tokencheck),每天查长效 token 的 mtime 年龄,过 330 天起弹横幅催你重签(token 不透明、读不出过期时间,按签发时刻近似)。手动验证: bash claude-wake-token-check.sh now
 换 token: rm ~/.config/claude-wake/token && ./install.sh
 卸载:    ./uninstall.sh   # 撤 tailscale serve + 收掉 wake 会话(token 保留)
 ```

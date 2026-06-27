@@ -9,6 +9,12 @@ PLIST_SRC="$DIR/${LABEL}.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
 
+# 第二个 agent：长效 token 到期提醒（每天查一次 mtime 年龄）
+TC_LABEL="com.jizhi.claude-wake-tokencheck"
+TC_SCRIPT="$DIR/claude-wake-token-check.sh"
+TC_SRC="$DIR/${TC_LABEL}.plist"
+TC_DST="$HOME/Library/LaunchAgents/${TC_LABEL}.plist"
+
 PORT="${WAKE_PORT:-8765}"
 TOKEN_DIR="$HOME/.config/claude-wake"
 TOKEN_FILE="$TOKEN_DIR/token"
@@ -19,7 +25,7 @@ command -v /usr/bin/python3 >/dev/null || { echo "需要 /usr/bin/python3（xcod
 PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH" command -v claude >/dev/null \
   || { echo "PATH 里找不到 claude（应在 ~/.local/bin）"; exit 1; }
 
-chmod +x "$WAKESH" "$SERVER"
+chmod +x "$WAKESH" "$SERVER" "$TC_SCRIPT"
 
 # 生成 token（已存在就复用，免得换机/重装后书签失效）
 mkdir -p "$TOKEN_DIR"; chmod 700 "$TOKEN_DIR"
@@ -29,6 +35,18 @@ if [ ! -s "$TOKEN_FILE" ]; then
 fi
 chmod 600 "$TOKEN_FILE"
 TOKEN="$(cat "$TOKEN_FILE")"
+
+# 长效 Anthropic 凭据（给无人值守的 wake 会话用，和本机交互登录态解耦）。
+# 这里不能代签——setup-token 要交互；只检查在不在，缺了就提示。
+OAUTH_FILE="$TOKEN_DIR/oauth-token"
+if [ -s "$OAUTH_FILE" ]; then
+  chmod 600 "$OAUTH_FILE"
+  OAUTH_NOTE="✅ 长效 token 已就位（$OAUTH_FILE）"
+else
+  OAUTH_NOTE="⚠️ 没有长效 token：wake 会话将继承本机交互登录态（refreshToken 一废即失效）。
+     补上（一次性，需交互）:  claude setup-token
+     然后:  umask 077; printf '%s' '<贴上 token>' > $OAUTH_FILE"
+fi
 
 # 占位符 → 绝对路径，让 plist 跟仓库脚本绑定（git pull 改脚本即生效）
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -42,6 +60,11 @@ sed -e "s|__SERVER__|$SERVER|g" \
 launchctl bootout "gui/$UID_NUM" "$PLIST_DST" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST_DST"
 launchctl kickstart -k "gui/$UID_NUM/$LABEL"
+
+# token 到期提醒 agent（同样幂等）
+sed -e "s|__CHECK__|$TC_SCRIPT|g" "$TC_SRC" > "$TC_DST"
+launchctl bootout "gui/$UID_NUM" "$TC_DST" 2>/dev/null || true
+launchctl bootstrap "gui/$UID_NUM" "$TC_DST"
 
 # 经 tailscale serve 用 https 暴露到自己的 tailnet（仅本人设备可达，叠加 token）
 TS_URL=""
@@ -72,6 +95,8 @@ installed (用户级 LaunchAgent, 无需 sudo).
 
 == Surge ponte 后备 ==
   在 Surge 配置里把 ponte 指到 127.0.0.1:$PORT，然后用 ponte 域名带同样的 token 访问。
+
+$OAUTH_NOTE
 
 token 存于 $TOKEN_FILE（chmod 600）。泄露了就 rm 它再重跑 install.sh 换新。
 状态:   launchctl print gui/$UID_NUM/$LABEL

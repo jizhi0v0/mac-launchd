@@ -20,11 +20,18 @@ set -uo pipefail
 # ~/.local/bin，都得显式补。
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
-WAKE_DIR_DEFAULT="${WAKE_DIR:-$HOME}"
+# 默认工作目录：用 /tmp 下的空目录，claude 在这秒起；指到 $HOME 那种巨目录会冷启动到
+# 超时。带 mkdir -p 兜底——/tmp 被系统周期清理后下次 wake 自动重建。要在某仓库里起会话，
+# 走 ?dir=（server 的 /dirs 选文件夹）单次覆盖即可。
+WAKE_DIR_DEFAULT="${WAKE_DIR:-/tmp/claude-wake-cwd}"
+mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
 WAKE_RC_NAME="${WAKE_RC_NAME:-wake-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
 WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
+# 给无人值守 wake 会话用的长效 Anthropic 凭据（claude setup-token 签的，写进这个文件）。
+# 不设/文件不存在 → 退回继承本机交互登录态（几小时刷一次，refreshToken 一废就得人肉重登）。
+WAKE_OAUTH_FILE="${WAKE_OAUTH_FILE:-$HOME/.config/claude-wake/oauth-token}"
 
 log() { printf '%s [claude-wake] %s\n' "$(date '+%F %T')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -57,9 +64,19 @@ spawn() {
     log "no system HTTPS proxy (direct)"
   fi
 
+  # 长效凭据：有就注入 CLAUDE_CODE_OAUTH_TOKEN，claude 用它而非 keychain，和本机交互
+  # 登录态彻底解耦（人肉重登/换号都不影响 wake）。没有就静默退回继承登录态。
+  local tok=""
+  if [ -r "$WAKE_OAUTH_FILE" ] && [ -s "$WAKE_OAUTH_FILE" ]; then
+    tok="export CLAUDE_CODE_OAUTH_TOKEN='$(cat "$WAKE_OAUTH_FILE")'; "
+    log "using long-lived oauth token from $WAKE_OAUTH_FILE"
+  else
+    log "no oauth-token file → 退回继承本机登录态（refreshToken 一废即失效）"
+  fi
+
   # claude --remote-control 要 PTY，塞进 tmux。dir 走 tmux -c（不进内层命令串，
-  # 避免任何引号/注入问题）；PATH+代理透传进内层 shell。
-  local cmd="export PATH='$PATH'; ${px}exec '$CLAUDE_BIN' --remote-control '$WAKE_RC_NAME'"
+  # 避免任何引号/注入问题）；PATH+代理+凭据透传进内层 shell。
+  local cmd="export PATH='$PATH'; ${tok}${px}exec '$CLAUDE_BIN' --remote-control '$WAKE_RC_NAME'"
   tmux new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
   log "spawned RC '$WAKE_RC_NAME' @ $dir"
 }
