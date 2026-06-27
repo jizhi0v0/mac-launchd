@@ -24,7 +24,7 @@ WAKE_DIR_DEFAULT="${WAKE_DIR:-$HOME}"
 WAKE_RC_NAME="${WAKE_RC_NAME:-wake-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
-WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-25}"
+WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
 
 log() { printf '%s [claude-wake] %s\n' "$(date '+%F %T')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }

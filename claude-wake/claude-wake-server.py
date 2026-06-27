@@ -165,8 +165,9 @@ class Handler(BaseHTTPRequestHandler):
             st = run_wake("status", timeout=10).stdout
             return self._send(200, landing_page(tok, st))
         if path == "/dirs":
+            # 扁平的名字数组，给 Shortcut「Choose from List」直接用；名字→路径由 /wake 解析
             return self._send(
-                200, json.dumps(list_project_dirs(), ensure_ascii=False),
+                200, json.dumps(sorted(list_project_dirs().keys()), ensure_ascii=False),
                 "application/json; charset=utf-8",
             )
         if path == "/status":
@@ -198,6 +199,9 @@ class Handler(BaseHTTPRequestHandler):
                 or form.get("format", [""])[0] == "json"
             )
             d = form.get("dir", [""])[0] or q.get("dir", [""])[0]
+            if d and not os.path.isdir(d):
+                # /dirs 给的是仓库名；把名字解析回绝对路径（不是名字就原样交给脚本校验）
+                d = list_project_dirs().get(d, d)
             args = ["wake"] + ([d] if d else [])
             try:
                 out = run_wake(*args)
