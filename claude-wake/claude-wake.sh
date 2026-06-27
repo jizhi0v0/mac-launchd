@@ -20,6 +20,18 @@ set -uo pipefail
 # ~/.local/bin，都得显式补。
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
+# 插件钩子（codex 的 SessionStart/SessionEnd/Stop）命令里写死 `node`，但 launchd 窄 PATH
+# 里没有 node（nvm 装的不在），于是 wake 会话报 "node: command not found"。bun 跟这些钩子
+# 兼容（已验证），且在 /opt/homebrew/bin（已在上面 PATH 里）、比 nvm 版本目录稳。给它造个
+# 叫 node 的垫片放进 wake 私有 bin 并入 PATH——满足字面量 `node` 调用。bun 不在就跳过（红字
+# 无害，非阻塞）。
+if BUN_BIN="$(command -v bun)"; then
+  WAKE_NODE_SHIM="$HOME/.config/claude-wake/bin"
+  mkdir -p "$WAKE_NODE_SHIM"
+  ln -sf "$BUN_BIN" "$WAKE_NODE_SHIM/node"
+  export PATH="$WAKE_NODE_SHIM:$PATH"
+fi
+
 # 默认工作目录：用 /tmp 下的空目录，claude 在这秒起；指到 $HOME 那种巨目录会冷启动到
 # 超时。带 mkdir -p 兜底——/tmp 被系统周期清理后下次 wake 自动重建。要在某仓库里起会话，
 # 走 ?dir=（server 的 /dirs 选文件夹）单次覆盖即可。
