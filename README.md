@@ -317,8 +317,9 @@ fi
 
 **鉴权 / 安全**:
 - **唤醒只走 POST** —— `GET /` 只回一个落地页(带「唤醒」按钮),**没有副作用**。所以在浏览器里直接打开 URL(书签被重开 / 预取 / 历史缩略图刷新 / 链接预览)都**不会**误起 RC 会话;必须显式点按钮或用 Shortcut 发 POST 才 spawn。
-- listener 只绑 `127.0.0.1`(不上局域网);除 `/health` 外都要 token(`Authorization: Bearer` / `?token=` / 表单字段,常数时间比对);token 48 hex(192-bit)存 `~/.config/claude-wake/token`(chmod 600)。
-- `dir` 参数过 `[ -d ]` 校验、只进 `tmux -c`(不拼进命令串,无注入)。
+- listener 只绑 `127.0.0.1`(不上局域网);除 `/health` 外都要 token(`Authorization: Bearer` / `?token=` / 表单字段 / `cwtok` Cookie,常数时间比对);token 48 hex(192-bit)存 `~/.config/claude-wake/token`(chmod 600)。首个带 token 的请求种 `HttpOnly + SameSite=Strict` Cookie,之后 `/browse` 导航链接不必带 token(不污染浏览历史、挡 CSRF)。
+- **`/browse` 目录浏览限死在 `WAKE_BROWSE_ROOT`(默认 `$HOME`)内**:请求路径 `realpath` 后必须落在根内,`../` 与符号链接逃逸一并挡掉(逃逸的软链在列表里直接藏掉),默认还藏点目录(`?all=1` 才显示)。
+- `dir` 参数:绝对路径(`/browse` 表单给的)`realpath` 后必须在根内,裸名字必须是 `/dirs` 已知仓库,否则拒绝(杜绝 `dir=/etc`);只进 `tmux -c`(不拼进命令串,无注入)。
 - 会话**不带** `--dangerously-skip-permissions` —— 就算别人拿 token 戳出会话,也得用**你账号登录的 App** 才能驱动,且每步权限你还得点。
 
 **可调**(plist `EnvironmentVariables` / `WAKE_PORT` 等 export 覆盖):
@@ -326,7 +327,8 @@ fi
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `WAKE_PORT` | `8765` | listener 端口(tailscale serve / ponte 指这里) |
-| `WAKE_DIR` | `$HOME` | 新会话起始目录(`?dir=` 可单次覆盖) |
+| `WAKE_DIR` | `/tmp/claude-wake-cwd` | 新会话默认起始目录(空目录秒起;`?dir=` 或 `/browse` 选目录可单次覆盖) |
+| `WAKE_BROWSE_ROOT` | `$HOME` | `/browse` 文件浏览/选目录的根,限死在内防越界 |
 | `WAKE_RC_NAME` | `wake-<LocalHostName>` | App 里显示的会话名 |
 | `WAKE_SESSION` | `wake` | tmux 会话名 |
 | `WAKE_CAPTURE_TIMEOUT` | `45` | 等 RC 链接出现的秒数 |
@@ -337,7 +339,7 @@ fi
 本地测:  curl -s -X POST -d "token=$(cat ~/.config/claude-wake/token)" http://127.0.0.1:8765/wake
 手机唤醒: 浏览器开 https://<主机>.<tailnet>.ts.net/?token=<token> → 点「唤醒」按钮 → 点返回链接接管
          （或 Shortcut: POST /wake + header Authorization: Bearer <token>,token 不进 URL）
-路由:    GET / 落地页(无副作用) · POST /wake[?dir=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库(给快捷指令选文件夹) · GET /status 看当前 · GET /health 探活(免 token)
+路由:    GET / 落地页(无副作用,带「📂 浏览目录」入口) · GET /browse[?path=][&all=1] 文件浏览选目录(限死 $HOME 内,纯链接前进/后退) · POST /wake[?dir=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库(给快捷指令选文件夹) · GET /status 看当前 · GET /health 探活(免 token)
 长效凭据: claude setup-token  → umask 077; printf '%s' '<token>' > ~/.config/claude-wake/oauth-token  (无人值守必备,免 refreshToken 失效后人肉重登)
 到期提醒: install.sh 顺带装第二个 agent(com.jizhi.claude-wake-tokencheck),每天查长效 token 的 mtime 年龄,过 330 天起弹横幅催你重签(token 不透明、读不出过期时间,按签发时刻近似)。手动验证: bash claude-wake-token-check.sh now
 换 token: rm ~/.config/claude-wake/token && ./install.sh
