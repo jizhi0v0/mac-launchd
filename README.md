@@ -339,7 +339,8 @@ fi
 本地测:  curl -s -X POST -d "token=$(cat ~/.config/claude-wake/token)" http://127.0.0.1:8765/wake
 手机唤醒: 浏览器开 https://<主机>.<tailnet>.ts.net/?token=<token> → 点「唤醒」按钮 → 点返回链接接管
          （或 Shortcut: POST /wake + header Authorization: Bearer <token>,token 不进 URL）
-路由:    GET / 落地页(无副作用,带「📂 浏览目录」入口) · GET /browse[?path=][&all=1] 文件浏览选目录(限死 $HOME 内,纯链接前进/后退) · POST /wake[?dir=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库(给快捷指令选文件夹) · GET /status 看当前 · GET /health 探活(免 token)
+路由:    GET / 落地页(无副作用,带「🖥️ 桌面版 / 📂 浏览」入口) · GET /app[/...] Next+shadcn 桌面版 SPA(入口鉴权种 Cookie、资源公开,数据走 /api/*) · GET /browse[?path=][&all=1] 纯 HTML 选目录(no-JS 兜底,限死 $HOME) · GET /api/browse[?path=] 目录 JSON · POST /wake|/api/wake[?dir=|path=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库 · GET /status · GET /health(免 token)
+桌面版:  Next 16.3 preview + shadcn 静态导出(SPA),源在 claude-wake/web/,构建产物 web/out/ **已入库**(开箱即用,Python daemon 直接托管在 /app)。改前端后重建: cd claude-wake/web && bun install && bun run build(产物会被服务端直接吃到)。手机/桌面同源,Cookie 鉴权;走 /api/* 取数据。
 长效凭据: claude setup-token  → umask 077; printf '%s' '<token>' > ~/.config/claude-wake/oauth-token  (无人值守必备,免 refreshToken 失效后人肉重登)
 到期提醒: install.sh 顺带装第二个 agent(com.jizhi.claude-wake-tokencheck),每天查长效 token 的 mtime 年龄,过 330 天起弹横幅催你重签(token 不透明、读不出过期时间,按签发时刻近似)。手动验证: bash claude-wake-token-check.sh now
 换 token: rm ~/.config/claude-wake/token && ./install.sh

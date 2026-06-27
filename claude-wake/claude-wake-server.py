@@ -19,6 +19,10 @@
                                 给 Shortcut 当文件夹选择列表。
   GET  /browse [?path=]       → 目录浏览页（从 WAKE_BROWSE_ROOT，默认 $HOME 起，纯链接前进/后退），
                                 每页一个「在此目录唤醒」POST 按钮。只读、限死在根内（防 ../ 与符号链接逃逸）。
+  GET  /app [/...]            → Next + shadcn 静态导出 SPA（web/out）。入口 /app 鉴权+种 Cookie，
+                                /app/<资源> 公开。数据走下面 /api/*。
+  GET  /api/browse [?path=]   → 目录 JSON（给 SPA）：{rel,crumb,parent,atRoot,dirs[],showHidden}。同样限根。
+  POST /api/wake [path=|dir=] → 同 POST /wake，但恒回 JSON {url}。path= 是相对根的路径。
   GET  /status                → 当前 wake 会话的链接（若在）。无副作用。
   GET  /health                → ok（不鉴权，给 tailscale/监控探活）。
 
@@ -27,6 +31,7 @@
 import html
 import hmac
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -45,6 +50,8 @@ WAKE_DIR_ROOTS = os.environ.get("WAKE_DIR_ROOTS", os.path.expanduser("~/Develope
 BROWSE_ROOT = os.path.realpath(
     os.environ.get("WAKE_BROWSE_ROOT", os.path.expanduser("~"))
 )
+# Next 静态导出（output: export, basePath /app）的产物目录，由本 server 托管在 /app 下。
+WEB_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "out")
 
 
 def in_root(abs_path):
@@ -151,7 +158,8 @@ def landing_page(token, status_text):
         + '<button style="font-size:1.3rem;padding:.9rem 2rem;border-radius:.6rem;'
         'border:0;background:#d97757;color:#fff">唤醒一个新会话</button>'
         + "</form>"
-        + '<p style="margin-top:1.2rem"><a href="/browse">📂 浏览目录，选一个起会话…</a></p>'
+        + '<p style="margin-top:1.2rem"><a href="/app">🖥️ 桌面版（Next + shadcn）</a>'
+        + ' · <a href="/browse">📂 纯 HTML 浏览</a></p>'
         + '<p style="color:#aaa;font-size:.9rem;margin-top:2rem">'
         "点按钮才会起新会话；直接打开本页不会。</p>"
         + "</body>"
@@ -208,6 +216,19 @@ def result_page(url):
     )
 
 
+def browse_json(abs_path, show_hidden=False):
+    """给 Next SPA 用的目录 JSON：当前相对路径、上级、子目录名列表。abs_path 须已限根。"""
+    rel = "" if abs_path == BROWSE_ROOT else os.path.relpath(abs_path, BROWSE_ROOT)
+    return {
+        "rel": rel,
+        "crumb": "~/" + rel if rel else "~",
+        "parent": None if abs_path == BROWSE_ROOT else os.path.dirname(rel),
+        "atRoot": abs_path == BROWSE_ROOT,
+        "dirs": list_subdirs(abs_path, show_hidden),
+        "showHidden": show_hidden,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "claude-wake"
 
@@ -218,6 +239,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.send_header("Cache-Control", "no-store")
         for k, v in (extra_headers or []):
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _serve_web(self, rel, cookie_tok=None):
+        """托管 Next 静态导出（web/out）。限死在 WEB_OUT 内（防穿越）。
+        入口 index.html 传 cookie_tok → 顺带种鉴权 Cookie；资源类公开。"""
+        target = os.path.realpath(os.path.join(WEB_OUT, rel))
+        if not (target == WEB_OUT or target.startswith(WEB_OUT + os.sep)) \
+                or not os.path.isfile(target):
+            return self._send(404, "前端未构建（cd web && bun run build）\n",
+                              "text/plain; charset=utf-8")
+        ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
+        with open(target, "rb") as f:
+            b = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b)))
+        # 入口 html 不缓存（保证鉴权/Cookie 每次走）；指纹化的静态资源可长缓存
+        self.send_header("Cache-Control",
+                         "no-store" if cookie_tok else "public, max-age=31536000")
+        if cookie_tok:
+            k, v = self._cookie(cookie_tok)
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(b)
@@ -254,10 +298,27 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/health", "/healthz"):
             return self._send(200, "ok\n", "text/plain; charset=utf-8")
 
+        # /app/<资源>：Next SPA 外壳（无密钥）公开托管，免 token —— 否则浏览器拉不到 JS/CSS。
+        # 数据全在下面 /api/*（要 token）后面，外壳公开不泄露任何东西。入口 /app 仍鉴权（见下）。
+        if path.startswith("/app/"):
+            return self._serve_web(path[len("/app/"):])
+
         tok = self._header_token() or q.get("token", [""])[0] or self._cookie_token()
         if not token_ok(tok):
             return self._send(401, "unauthorized\n", "text/plain; charset=utf-8")
 
+        if path == "/app":
+            # SPA 入口：鉴权 + 顺带种 Cookie，之后 /api/* 靠 Cookie 同源放行
+            return self._serve_web("index.html", cookie_tok=tok)
+        if path == "/api/browse":
+            target = resolve_in_root(q.get("path", [""])[0])
+            if target is None:
+                return self._send(400, json.dumps({"error": "bad path"}),
+                                  "application/json; charset=utf-8")
+            show_hidden = q.get("all", [""])[0] == "1"
+            return self._send(
+                200, json.dumps(browse_json(target, show_hidden), ensure_ascii=False),
+                "application/json; charset=utf-8", extra_headers=[self._cookie(tok)])
         if path in ("/", "/wake"):
             st = run_wake("status", timeout=10).stdout
             return self._send(200, landing_page(tok, st), extra_headers=[self._cookie(tok)])
@@ -296,15 +357,24 @@ class Handler(BaseHTTPRequestHandler):
         if not token_ok(tok):
             return self._send(401, "unauthorized\n", "text/plain; charset=utf-8")
 
-        if path in ("/", "/wake"):
-            # Shortcut / API 客户端带 Accept: application/json（或 ?format=json）→ 回 JSON
+        if path in ("/", "/wake", "/api/wake"):
+            # Shortcut / API / SPA 带 Accept: application/json（或 ?format=json，或走 /api/wake）→ 回 JSON
             wants_json = (
-                "application/json" in self.headers.get("Accept", "")
+                path == "/api/wake"
+                or "application/json" in self.headers.get("Accept", "")
                 or q.get("format", [""])[0] == "json"
                 or form.get("format", [""])[0] == "json"
             )
+            # SPA 传相对路径 path=（相对 BROWSE_ROOT）；旧客户端传 dir=（绝对路径或 /dirs 仓库名）
+            rel = form.get("path", [""])[0] or q.get("path", [""])[0]
             d = form.get("dir", [""])[0] or q.get("dir", [""])[0]
-            if d:
+            if rel and not d:
+                abs_dir = resolve_in_root(rel)
+                if abs_dir is None:
+                    return self._send(400, json.dumps({"error": "bad path"}),
+                                      "application/json; charset=utf-8")
+                d = abs_dir
+            elif d:
                 # 安全：绝对路径（/browse 表单给的）必须 realpath 后落在 BROWSE_ROOT 内；
                 # 否则当作 /dirs 仓库名解析。两者都不通过就拒绝——杜绝 dir=/etc 这类越界。
                 if d.startswith("/"):
