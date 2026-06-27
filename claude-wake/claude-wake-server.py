@@ -13,7 +13,10 @@
 
 路由：
   GET  /  或 /wake [?token=]  → 落地页（显示当前会话 + 一个「唤醒」按钮）。无副作用。
-  POST /  或 /wake            → reap+spawn 一个全新 claude RC 会话，返回接管链接。
+  POST /  或 /wake [dir=…]    → reap+spawn 一个全新 claude RC 会话，返回接管链接。
+                                带 Accept: application/json（或 ?format=json）则回 {"url": …}。
+  GET  /dirs                  → WAKE_DIR_ROOTS（默认 ~/Developer）下 git 仓库的 name→路径 JSON，
+                                给 Shortcut 当文件夹选择列表。
   GET  /status                → 当前 wake 会话的链接（若在）。无副作用。
   GET  /health                → ok（不鉴权，给 tailscale/监控探活）。
 
@@ -21,6 +24,7 @@
 """
 import html
 import hmac
+import json
 import os
 import subprocess
 import sys
@@ -33,6 +37,30 @@ TOKEN_FILE = os.environ.get(
     "WAKE_TOKEN_FILE", os.path.expanduser("~/.config/claude-wake/token")
 )
 WAKE_SH = os.environ.get("WAKE_SH", "")
+# /dirs 列哪些目录：扫这些根下的 git 仓库（含 .git 的目录）。冒号分隔多个根。
+WAKE_DIR_ROOTS = os.environ.get("WAKE_DIR_ROOTS", os.path.expanduser("~/Developer"))
+
+
+def list_project_dirs(max_depth=3):
+    """扫 WAKE_DIR_ROOTS 下的 git 仓库，返回 name→绝对路径（给 Shortcut 当文件夹列表）。
+    遇到仓库就不再往里递归；同名目录用上一级名字消歧。"""
+    out = {}
+    for root in WAKE_DIR_ROOTS.split(":"):
+        root = os.path.expanduser(root.strip()).rstrip("/")
+        if not os.path.isdir(root):
+            continue
+        base = root.count(os.sep)
+        for dirpath, dirnames, filenames in os.walk(root):
+            if dirpath.count(os.sep) - base >= max_depth:
+                dirnames[:] = []
+                continue
+            if ".git" in dirnames or ".git" in filenames:
+                name = os.path.basename(dirpath)
+                if name in out and out[name] != dirpath:
+                    name = os.path.basename(os.path.dirname(dirpath)) + "/" + name
+                out[name] = dirpath
+                dirnames[:] = []  # 不再往仓库里递归
+    return dict(sorted(out.items()))
 
 
 def load_token():
@@ -136,6 +164,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/wake"):
             st = run_wake("status", timeout=10).stdout
             return self._send(200, landing_page(tok, st))
+        if path == "/dirs":
+            return self._send(
+                200, json.dumps(list_project_dirs(), ensure_ascii=False),
+                "application/json; charset=utf-8",
+            )
         if path == "/status":
             return self._send(
                 200, run_wake("status", timeout=10).stdout or "n/a\n",
@@ -158,15 +191,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(401, "unauthorized\n", "text/plain; charset=utf-8")
 
         if path in ("/", "/wake"):
+            # Shortcut / API 客户端带 Accept: application/json（或 ?format=json）→ 回 JSON
+            wants_json = (
+                "application/json" in self.headers.get("Accept", "")
+                or q.get("format", [""])[0] == "json"
+                or form.get("format", [""])[0] == "json"
+            )
             d = form.get("dir", [""])[0] or q.get("dir", [""])[0]
             args = ["wake"] + ([d] if d else [])
             try:
                 out = run_wake(*args)
             except subprocess.TimeoutExpired:
+                if wants_json:
+                    return self._send(504, json.dumps({"error": "wake timed out"}),
+                                      "application/json; charset=utf-8")
                 return self._send(504, "wake timed out\n", "text/plain; charset=utf-8")
             if out.returncode == 0:
-                page = result_page(out.stdout.strip()).replace("__T__", html.escape(tok))
-                return self._send(200, page)
+                url = out.stdout.strip()
+                if wants_json:
+                    return self._send(200, json.dumps({"url": url}),
+                                      "application/json; charset=utf-8")
+                return self._send(200, result_page(url).replace("__T__", html.escape(tok)))
+            if wants_json:
+                return self._send(500, json.dumps({"error": out.stderr.strip()}),
+                                  "application/json; charset=utf-8")
             return self._send(
                 500, "wake failed:\n" + out.stderr, "text/plain; charset=utf-8"
             )

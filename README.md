@@ -334,7 +334,7 @@ fi
 本地测:  curl -s -X POST -d "token=$(cat ~/.config/claude-wake/token)" http://127.0.0.1:8765/wake
 手机唤醒: 浏览器开 https://<主机>.<tailnet>.ts.net/?token=<token> → 点「唤醒」按钮 → 点返回链接接管
          （或 Shortcut: POST /wake + header Authorization: Bearer <token>,token 不进 URL）
-路由:    GET / 落地页(无副作用) · POST /wake[?dir=] 起会话 · GET /status 看当前 · GET /health 探活(免 token)
+路由:    GET / 落地页(无副作用) · POST /wake[?dir=](带 Accept: application/json 回 {"url"}) 起会话 · GET /dirs 列 ~/Developer 下 git 仓库(给快捷指令选文件夹) · GET /status 看当前 · GET /health 探活(免 token)
 换 token: rm ~/.config/claude-wake/token && ./install.sh
 卸载:    ./uninstall.sh   # 撤 tailscale serve + 收掉 wake 会话(token 保留)
 ```
