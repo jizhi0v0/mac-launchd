@@ -258,12 +258,12 @@ export default function Page() {
       )}
 
       <div className="flex flex-col gap-6 md:flex-row md:items-start">
-        {/* 左栏：按目录分组的会话（无会话时不占位，浏览器吃满宽） */}
-        {sessions.length > 0 && (
+        {/* 左栏：会话 + 正在发起的占位（无任何动静时不占位，浏览器吃满宽） */}
+        {(sessions.length > 0 || starting.size > 0) && (
           <aside className="flex flex-col gap-2 md:w-72 md:shrink-0">
             <div className="flex items-center justify-between px-1">
               <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-                进行中 · {sessions.length}
+                进行中 · {sessions.length + starting.size}
               </h2>
               {sessions.length > 1 && (
                 <button
@@ -274,6 +274,18 @@ export default function Page() {
                 </button>
               )}
             </div>
+            {/* 起会话请求在飞、还没拿到 id 时的即时占位——别让点了之后左侧一片空白看着像没反应 */}
+            {[...starting].map((key) => (
+              <div
+                key={"starting-" + key}
+                className="bg-card text-muted-foreground flex items-center gap-2 rounded-lg border px-2.5 py-2 text-sm"
+              >
+                <Loader2 className="size-3.5 shrink-0 animate-spin text-amber-500" />
+                <span className="truncate">
+                  起会话中…{key === "." ? "" : ` ${basename(key.replace(/^\+/, ""))}`}
+                </span>
+              </div>
+            ))}
             {groups.map((g) => (
               <div key={g.dir} className="bg-card overflow-hidden rounded-lg border">
                 <div className="flex items-center justify-between gap-1 border-b px-2.5 py-1.5">
