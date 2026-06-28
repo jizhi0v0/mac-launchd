@@ -116,10 +116,20 @@ export default function Page() {
       /* 网络抖动：保留上次列表 */
     }
   }, []);
+  // 自调度循环（不是 setInterval）：等上一次 poll 完成、再隔 1.5s 发下一次，永不重叠。
+  // setInterval 会"到点就发"，一旦单次 >1.5s 就会层层叠加，把 tmux 命令堵到延迟雪崩、UI 卡死。
   useEffect(() => {
-    refreshSessions();
-    const iv = setInterval(refreshSessions, 1500);
-    return () => clearInterval(iv);
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = async () => {
+      await refreshSessions();
+      if (!stop) timer = setTimeout(loop, 1500);
+    };
+    loop();
+    return () => {
+      stop = true;
+      clearTimeout(timer);
+    };
   }, [refreshSessions]);
 
   const navigate = useCallback((p: string) => {

@@ -14,6 +14,7 @@
 #       claude-wake.sh peek  <id>      # 打印该会话 pane 内容（server 轮询判进度用）
 #       claude-wake.sh alive <id>      # 该会话还在不在（yes/no）
 #       claude-wake.sh list            # 所有 live 会话：每行 id<TAB>rc<TAB>dir
+#       claude-wake.sh dump            # 所有 live 会话的元信息 + pane（server 一次拿全量，省 subprocess）
 #       claude-wake.sh status          # 所有 live 会话的 URL：每行 rc<TAB>dir<TAB>url
 #       claude-wake.sh reap [id] [rc]  # 精准收一个会话；无 id = 全部收（= reap-all）
 #       claude-wake.sh reap-all        # 全部收掉（卸载用）
@@ -237,6 +238,19 @@ case "${1:-wake}" in
           rc="$($T show-options -t "$s" -v @rc 2>/dev/null || true)"
           dir="$($T show-options -t "$s" -v @dir 2>/dev/null || true)"
           printf '%s\t%s\t%s\n' "$id" "$rc" "$dir"
+        done
+    ;;
+  dump)
+    # 一次性吐出所有 live 会话的元信息 + pane 内容，让 server 一个 subprocess 拿全量（避免它
+    # 对每个会话各 spawn 一次 wake.sh：会话一多、轮询一叠加，tmux 命令排队、延迟雪崩）。
+    # 格式：每个会话先一行哨兵 "@@CW<TAB>id<TAB>rc<TAB>dir"，紧跟其 pane 原样多行，直到下一个哨兵。
+    $T list-sessions -F '#{session_name}' 2>/dev/null | grep "^$WAKE_SESS_PREFIX" \
+      | while read -r s; do
+          id="${s#"$WAKE_SESS_PREFIX"}"
+          rc="$($T show-options -t "$s" -v @rc 2>/dev/null || true)"
+          dir="$($T show-options -t "$s" -v @dir 2>/dev/null || true)"
+          printf '@@CW\t%s\t%s\t%s\n' "$id" "$rc" "$dir"
+          $T capture-pane -t "$s" -p 2>/dev/null || true
         done
     ;;
   reap)

@@ -182,17 +182,37 @@ def classify(pane):
     return phase, (m.group(0) if m else None), lines[-8:]
 
 
+def parse_dump(out):
+    """把 wake.sh dump 的输出切成 [(sid, rc, dir, pane), ...]。
+       哨兵行 '@@CW\\tid\\trc\\tdir' 起一段，之后到下一个哨兵前的所有行都是该会话的 pane。"""
+    blocks = []
+    cur = None
+    pane_lines = []
+    for line in out.splitlines():
+        if line.startswith("@@CW\t"):
+            if cur is not None:
+                blocks.append((*cur, "\n".join(pane_lines)))
+            parts = line.split("\t")
+            cur = (parts[1], parts[2] if len(parts) > 2 else "",
+                   parts[3] if len(parts) > 3 else "")
+            pane_lines = []
+        elif cur is not None:
+            pane_lines.append(line)
+    if cur is not None:
+        blocks.append((*cur, "\n".join(pane_lines)))
+    return blocks
+
+
 def list_sessions():
     """所有 live wake 会话的实时状态数组（给 SPA 列出、各自可 kill）。无超时——卡住就一直停在
-       某 phase，由用户对那一个点「收掉」。新的在上。"""
-    out = run_wake("list", timeout=10).stdout
+       某 phase，由用户对那一个点「收掉」。新的在上。
+       一次 dump 拿全量（不再对每个会话单独 spawn wake.sh）：会话多 + 轮询叠加时，per-session
+       spawn 会让 tmux 命令排队、延迟雪崩（实测 8s→22s 一路涨），轮询彻底卡死。"""
+    out = run_wake("dump", timeout=15).stdout
     res = []
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3 or not parts[0]:
+    for sid, rc, d, pane in parse_dump(out):
+        if not sid:
             continue
-        sid, rc, d = parts[0], parts[1], parts[2]
-        pane = run_wake("peek", sid, timeout=10).stdout
         phase, url, tail = classify(pane)
         with JOBS_LOCK:
             j = JOBS.get(sid)
@@ -216,6 +236,21 @@ def list_sessions():
         })
     res.sort(key=lambda x: (x["elapsed"] is None, -(x["elapsed"] or 0)))
     return res
+
+
+# 防雪崩第二道：多客户端/多标签同时轮询时，用锁+短缓存把并发请求收敛成"每 ~0.8s 至多一次 dump"。
+# 缓存窗口 < 前端 1.5s 间隔，单标签每次仍拿到新数据；锁让并发请求排队而不是各自 spawn 一堆。
+_SESS_CACHE = {"at": 0.0, "data": []}
+_SESS_LOCK = threading.Lock()
+
+
+def list_sessions_cached():
+    with _SESS_LOCK:
+        if time.time() - _SESS_CACHE["at"] < 0.8:
+            return _SESS_CACHE["data"]
+        data = list_sessions()
+        _SESS_CACHE.update(at=time.time(), data=data)
+        return data
 
 
 PAGE_HEAD = (
@@ -423,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
             # SPA 入口：鉴权 + 顺带种 Cookie，之后 /api/* 靠 Cookie 同源放行
             return self._serve_web("index.html", cookie_tok=tok)
         if path == "/api/wake/sessions":
-            return self._send(200, json.dumps(list_sessions(), ensure_ascii=False),
+            return self._send(200, json.dumps(list_sessions_cached(), ensure_ascii=False),
                               "application/json; charset=utf-8",
                               extra_headers=[self._cookie(tok)])
         if path == "/api/browse":
