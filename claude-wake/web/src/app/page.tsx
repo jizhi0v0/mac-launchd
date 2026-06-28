@@ -67,11 +67,14 @@ export default function Page() {
 
   const navigate = useCallback((p: string) => {
     setFilter("");
-    window.history.pushState(
-      { p },
-      "",
-      p ? `?p=${encodeURIComponent(p)}` : window.location.pathname,
-    );
+    // 保留 token query：跳转后的 URL 仍自带鉴权，刷新/分享/书签都不掉 token。
+    // （同会话其实靠 Cookie 也能认，但裸开跳转后的 URL 没 Cookie 会 401，所以带上更稳。）
+    const params = new URLSearchParams();
+    if (p) params.set("p", p);
+    const token = new URLSearchParams(window.location.search).get("token");
+    if (token) params.set("token", token);
+    const qs = params.toString();
+    window.history.pushState({ p }, "", qs ? `?${qs}` : window.location.pathname);
     setPath(p);
   }, []);
 
