@@ -203,9 +203,16 @@ def list_sessions():
                 j["url"] = url
         if not url and known:  # URL 在 TUI 里滚走了，用记住的，别退回"注册中"
             url, phase = known, "ready"
+        # rel = 相对 BROWSE_ROOT 的路径（给前端按目录分组 / 点头跳到该目录 / 在该组再唤醒）。
+        # 不在根内（如默认的 /tmp/claude-wake-cwd）→ None：前端据此走"默认目录"重唤醒、组头不可点。
+        rel = None
+        if d == BROWSE_ROOT:
+            rel = ""
+        elif d.startswith(BROWSE_ROOT + os.sep):
+            rel = os.path.relpath(d, BROWSE_ROOT)
         res.append({
-            "id": sid, "rc": rc, "dir": d, "phase": phase, "url": url, "tail": tail,
-            "elapsed": int(time.time() - started) if started else None,
+            "id": sid, "rc": rc, "dir": d, "rel": rel, "phase": phase, "url": url,
+            "tail": tail, "elapsed": int(time.time() - started) if started else None,
         })
     res.sort(key=lambda x: (x["elapsed"] is None, -(x["elapsed"] or 0)))
     return res

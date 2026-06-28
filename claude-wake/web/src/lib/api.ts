@@ -52,7 +52,8 @@ export type WakePhase =
 export type WakeSession = {
   id: string;
   rc: string;
-  dir: string;
+  dir: string; // 绝对路径
+  rel: string | null; // 相对 $HOME 的路径；不在根内（如默认 /tmp 目录）→ null
   phase: WakePhase;
   elapsed: number | null; // 起会话至今秒数；server 重启后/外部起的会话未知 → null
   url: string | null;
@@ -64,18 +65,20 @@ const FORM = {
   Accept: "application/json",
 };
 
-// 起一个【独立】后台会话，立刻返回 job(=会话 id)，不等 URL。可并存多个。path 为 "" → 默认 /tmp 空目录。
+// 起一个【独立】后台会话，立刻返回 job(=会话 id)，不等 URL。可并存多个。
+// target："" → 默认 /tmp 空目录；以 / 开头 → 绝对路径（dir=，server 校验须在根内）；
+// 否则 → 相对 $HOME 的路径（path=）。
 export async function wakeStart(
-  path: string,
+  target: string,
 ): Promise<{ job: string; rc: string; dir: string }> {
+  const body: Record<string, string> = target.startsWith("/")
+    ? { dir: target }
+    : target
+      ? { path: target }
+      : {};
   const r = await fetchT(
     "/api/wake/start",
-    {
-      method: "POST",
-      headers: FORM,
-      body: new URLSearchParams(path ? { path } : {}),
-      credentials: "same-origin",
-    },
+    { method: "POST", headers: FORM, body: new URLSearchParams(body), credentials: "same-origin" },
     30000,
   );
   return jsonOrThrow(r, "起会话");
