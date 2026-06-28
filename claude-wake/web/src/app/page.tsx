@@ -26,12 +26,12 @@ import {
 
 import {
   browse,
-  stats,
+  fetchState,
   wakeKill,
   wakeReapAll,
-  wakeSessions,
   wakeStart,
   type BrowseData,
+  type LiveState,
   type SysStats,
   type WakeSession,
 } from "@/lib/api";
@@ -112,51 +112,77 @@ export default function Page() {
     load(path, all);
   }, [path, all, load]);
 
-  // 会话轮询：无超时，每 1.5s 抓所有 live 会话状态。单次失败不清空列表。
-  const refreshSessions = useCallback(async () => {
+  // 把一帧组合状态 {sessions,stats} 落到 UI；并撤掉已被服务端确认的乐观占位。
+  const applyState = useCallback((st: LiveState) => {
+    const ss = st.sessions ?? [];
+    setPolled(ss);
+    if (st.stats) setSys(st.stats);
+    setPending((p) => p.filter((x) => !ss.some((y) => y.id === x.id)));
+  }, []);
+  const refreshOnce = useCallback(async () => {
     try {
-      const s = await wakeSessions();
-      setPolled(s);
-      setPending((p) => p.filter((x) => !s.some((y) => y.id === x.id)));
+      applyState(await fetchState());
     } catch {
-      /* 网络抖动：保留上次列表 */
+      /* 抖动忽略 */
     }
-  }, []);
-  // 自调度循环（不是 setInterval）：等上一次 poll 完成、再隔 1.5s 发下一次，永不重叠。
-  // setInterval 会"到点就发"，一旦单次 >1.5s 就会层层叠加，把 tmux 命令堵到延迟雪崩、UI 卡死。
-  useEffect(() => {
-    let stop = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const loop = async () => {
-      await refreshSessions();
-      if (!stop) timer = setTimeout(loop, 1500);
-    };
-    loop();
-    return () => {
-      stop = true;
-      clearTimeout(timer);
-    };
-  }, [refreshSessions]);
+  }, [applyState]);
 
-  // 负载轮询：3s 一次（server 端 2s 缓存，开销小），唤醒前提醒机器吃不吃紧。
+  // 实时状态：主走 SSE（/api/stream，变了才推、共享 poller，省往返又防雪崩）；连不上 / 6s 没
+  // 收到消息（多半是代理不透传 SSE）则自动退回轮询 /api/state。EventSource 自带断线重连。
   useEffect(() => {
     let stop = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const loop = async () => {
-      try {
-        const s = await stats();
-        if (!stop) setSys(s);
-      } catch {
-        /* 拿不到负载不影响主功能 */
-      }
-      if (!stop) timer = setTimeout(loop, 3000);
+    let es: EventSource | null = null;
+    let pollTimer: ReturnType<typeof setTimeout>;
+    let watchdog: ReturnType<typeof setTimeout>;
+    const poll = () => {
+      const loop = async () => {
+        if (stop) return;
+        await refreshOnce();
+        if (!stop) pollTimer = setTimeout(loop, 1500);
+      };
+      loop();
     };
-    loop();
+    const sse = () => {
+      try {
+        es = new EventSource("/api/stream");
+      } catch {
+        poll();
+        return;
+      }
+      let got = false;
+      watchdog = setTimeout(() => {
+        if (!got && !stop) {
+          es?.close();
+          es = null;
+          poll();
+        }
+      }, 6000);
+      es.onmessage = (e) => {
+        got = true;
+        clearTimeout(watchdog);
+        try {
+          applyState(JSON.parse(e.data));
+        } catch {
+          /* 忽略坏帧 */
+        }
+      };
+      es.onerror = () => {
+        // EventSource 会自己重连；只有它彻底放弃（CLOSED）才退回轮询。
+        if (es && es.readyState === EventSource.CLOSED && !stop) {
+          clearTimeout(watchdog);
+          es = null;
+          poll();
+        }
+      };
+    };
+    sse();
     return () => {
       stop = true;
-      clearTimeout(timer);
+      es?.close();
+      clearTimeout(pollTimer);
+      clearTimeout(watchdog);
     };
-  }, []);
+  }, [applyState, refreshOnce]);
 
   const navigate = useCallback((p: string) => {
     setFilter("");
@@ -181,7 +207,7 @@ export default function Page() {
           ...prev,
         ]);
         setExpandedId(r.job);
-        refreshSessions();
+        refreshOnce();
       } catch (e) {
         setWakeErr(String((e as Error)?.message || e));
       } finally {
@@ -192,7 +218,7 @@ export default function Page() {
         });
       }
     },
-    [refreshSessions],
+    [refreshOnce],
   );
 
   const doKill = useCallback(
@@ -204,9 +230,9 @@ export default function Page() {
       } catch {
         /* 尽力而为 */
       }
-      refreshSessions();
+      refreshOnce();
     },
-    [refreshSessions],
+    [refreshOnce],
   );
 
   const doKillAll = useCallback(async () => {
@@ -217,8 +243,8 @@ export default function Page() {
     } catch {
       /* 尽力而为 */
     }
-    refreshSessions();
-  }, [refreshSessions]);
+    refreshOnce();
+  }, [refreshOnce]);
 
   const toggleTheme = () => {
     const d = !dark;

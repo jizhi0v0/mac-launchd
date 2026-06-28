@@ -123,6 +123,14 @@ export async function stats(): Promise<SysStats> {
   return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 8000), "查负载");
 }
 
+// 组合实时状态：会话 + 负载一把拿。SSE(/api/stream) 是主路；这个 /api/state 给初始渲染
+// 和 SSE 连不上时退回轮询用。
+export type LiveState = { sessions: WakeSession[]; stats: SysStats | null };
+export async function fetchState(): Promise<LiveState> {
+  const u = new URL("/api/state", location.origin);
+  return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 15000), "查状态");
+}
+
 // 一键收掉所有 live 会话。
 export async function wakeReapAll(): Promise<void> {
   await fetchT(

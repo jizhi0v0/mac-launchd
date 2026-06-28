@@ -28,6 +28,10 @@
   GET  /api/wake/sessions     → 所有 live 会话的实时状态数组：[{id,rc,dir,phase,elapsed,url,tail[]}]。
                                 phase：booting(冷启动)→rendering(注册 RC)→ready(拿到链接)；
                                 无超时——卡住就一直停在某 phase，由用户对那一个 kill。
+  GET  /api/stream            → SSE：推送 {sessions,stats}，变了才发(共享 poller，N 客户端也只
+                                每秒最多 dump 一次 tmux)；15s 心跳。SPA 主用这个，省往返、防雪崩。
+  GET  /api/state             → 同样的 {sessions,stats} 一把(初始渲染 + SSE 不通时退回轮询)。
+  GET  /api/stats             → 机器负载 {load,cpu,mem,swap,busy}(唤醒前提醒)。
   POST /api/wake/kill?job=    → 精准收掉某一个会话（本地进程 + 注销云端登记），不动其它。
   GET  /status                → 所有 live 会话的链接（多会话）。无副作用。
   GET  /health                → ok（不鉴权，给 tailscale/监控探活）。
@@ -208,7 +212,11 @@ def list_sessions():
        某 phase，由用户对那一个点「收掉」。新的在上。
        一次 dump 拿全量（不再对每个会话单独 spawn wake.sh）：会话多 + 轮询叠加时，per-session
        spawn 会让 tmux 命令排队、延迟雪崩（实测 8s→22s 一路涨），轮询彻底卡死。"""
-    out = run_wake("dump", timeout=15).stdout
+    try:
+        out = run_wake("dump", timeout=8).stdout
+    except subprocess.TimeoutExpired:
+        # 机器过载时 tmux 命令会排队、dump 变慢——别让请求 500/线程崩，返回上次已知状态兜底。
+        return _SESS_CACHE.get("data") or []
     res = []
     for sid, rc, d, pane in parse_dump(out):
         if not sid:
@@ -311,6 +319,46 @@ def system_stats_cached():
         data = system_stats()
         _STATS_CACHE.update(at=time.time(), data=data)
         return data
+
+
+# ---- SSE 状态推送：一个共享后台 poller 算 {sessions,stats}，变了才广播给所有 SSE 连接 ----
+# 关键：无论多少客户端/标签页，tmux 每秒最多被 dump 一次（共享 poller），而不是每个客户端各自
+# 轮询 —— 既减往返、又从根上杜绝之前的轮询雪崩。没人看（无 SSE 连接）时 poller 休眠、不碰 tmux。
+# stats 较贵（sysctl/vm_stat），3s 才算一次。/api/state 是同样的 {sessions,stats}，给初始渲染
+# 和"SSE 不通时退回轮询"用（按需算、带缓存，不依赖 poller）。
+_STREAM = {"json": json.dumps({"sessions": [], "stats": None}), "clients": 0}
+_STREAM_CV = threading.Condition()
+_POLLER_STARTED = False
+
+
+def _poller():
+    last_stats_at, cached_stats = 0.0, None
+    while True:
+        with _STREAM_CV:
+            while _STREAM["clients"] == 0:  # 没人看就睡，不碰 tmux
+                _STREAM_CV.wait()
+        try:
+            sessions = list_sessions()
+            now = time.time()
+            if cached_stats is None or now - last_stats_at >= 3:
+                cached_stats = system_stats()
+                last_stats_at = now
+            js = json.dumps({"sessions": sessions, "stats": cached_stats},
+                            ensure_ascii=False)
+            with _STREAM_CV:
+                if js != _STREAM["json"]:
+                    _STREAM["json"] = js
+                    _STREAM_CV.notify_all()  # 变了才唤醒所有 SSE 连接推送
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+
+def _ensure_poller():
+    global _POLLER_STARTED
+    if not _POLLER_STARTED:
+        _POLLER_STARTED = True
+        threading.Thread(target=_poller, daemon=True).start()
 
 
 PAGE_HEAD = (
@@ -451,6 +499,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _serve_sse(self, tok):
+        """SSE 长连接：连上先推一帧当前状态，之后 poller 检测到变化才推新帧；15s 没变就发心跳。
+        引用计数客户端数——有人连 poller 才转、最后一个断开就休眠。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")  # SSE 用读到关闭的语义，避免 keep-alive 分帧歧义
+        k, v = self._cookie(tok)
+        self.send_header(k, v)
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.connection.settimeout(None)  # 长连接不超时
+        except OSError:
+            pass
+        with _STREAM_CV:
+            _STREAM["clients"] += 1
+            _STREAM_CV.notify_all()  # 唤醒 poller 开始转
+        _ensure_poller()
+        last = None
+        try:
+            while True:
+                with _STREAM_CV:
+                    cur = _STREAM["json"]
+                    if cur == last:
+                        _STREAM_CV.wait(timeout=15)
+                        cur = _STREAM["json"]
+                if cur != last:
+                    self.wfile.write(b"data: " + cur.encode("utf-8") + b"\n\n")
+                    last = cur
+                else:
+                    self.wfile.write(b": ping\n\n")  # 心跳保活（穿代理）
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            pass  # 客户端断开
+        finally:
+            with _STREAM_CV:
+                _STREAM["clients"] -= 1
+
     @staticmethod
     def _cookie(tok):
         """种 token 到 HttpOnly + SameSite=Strict Cookie：之后导航链接不必带 token
@@ -529,6 +616,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(system_stats_cached()),
                               "application/json; charset=utf-8",
                               extra_headers=[self._cookie(tok)])
+        if path == "/api/state":
+            # 组合 {sessions,stats}（初始渲染 + SSE 不通时退回轮询用）。按需算、走缓存，不依赖 poller。
+            body = json.dumps({"sessions": list_sessions_cached(),
+                               "stats": system_stats_cached()}, ensure_ascii=False)
+            return self._send(200, body, "application/json; charset=utf-8",
+                              extra_headers=[self._cookie(tok)])
+        if path == "/api/stream":
+            return self._serve_sse(tok)
         if path == "/api/browse":
             target = resolve_in_root(q.get("path", [""])[0])
             if target is None:
