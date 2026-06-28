@@ -106,3 +106,8 @@
 .cw-scroll:hover::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
 }
+
+/* 列分割竖线：默认 --border 只有 10% 白，几乎看不见；用 foreground 18% 明确可见、随主题适配。 */
+.col-divider {
+  border-right: 1px solid color-mix(in oklch, var(--foreground) 18%, transparent);
+}

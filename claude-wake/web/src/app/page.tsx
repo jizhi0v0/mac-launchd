@@ -465,7 +465,7 @@ export default function Page() {
                   key={prefix || "~"}
                   className={cn(
                     "cw-scroll w-56 shrink-0 overflow-y-auto",
-                    k < colPrefixes.length - 1 && "border-r",
+                    k < colPrefixes.length - 1 && "col-divider",
                   )}
                 >
                   {col?.error ? (
