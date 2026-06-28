@@ -105,6 +105,24 @@ export async function wakeKill(job: string): Promise<void> {
   );
 }
 
+// 机器负载快照（唤醒前提醒：机器吃紧时新唤醒会慢/超时）。
+export type SysStats = {
+  load1: number;
+  load5: number;
+  ncpu: number;
+  loadPerCpu: number; // 每核负载，>1.5 即 CPU 在排队
+  memTotalMB: number;
+  memUsedMB: number;
+  memUsedPct: number;
+  swapUsedMB: number;
+  busy: boolean; // server 综合判定：负载高/在换页/内存满
+};
+
+export async function stats(): Promise<SysStats> {
+  const u = new URL("/api/stats", location.origin);
+  return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 8000), "查负载");
+}
+
 // 一键收掉所有 live 会话。
 export async function wakeReapAll(): Promise<void> {
   await fetchT(

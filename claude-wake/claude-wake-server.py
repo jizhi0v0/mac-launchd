@@ -253,6 +253,66 @@ def list_sessions_cached():
         return data
 
 
+def _sysctl(name):
+    try:
+        return subprocess.run(["sysctl", "-n", name], capture_output=True,
+                              text=True, timeout=3).stdout.strip()
+    except Exception:
+        return ""
+
+
+def system_stats():
+    """机器负载/内存快照——唤醒前给用户提醒：每个 claude RC 是个重 Node 进程，机器吃紧时
+       新唤醒会慢甚至超时（实测 load 60 + swap 8.6G 时 spawn 4–6s→30s）。"""
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except OSError:
+        load1 = load5 = load15 = 0.0
+    ncpu = os.cpu_count() or 1
+    mem_total = int(_sysctl("hw.memsize") or 0)
+    mem_used = 0
+    try:
+        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+        m = re.search(r"page size of (\d+)", vm)
+        page = int(m.group(1)) if m else 4096
+
+        def pg(label):
+            mm = re.search(rf"{label}:\s+(\d+)\.", vm)
+            return int(mm.group(1)) if mm else 0
+        # used ≈ active + wired + 压缩器占用（macOS "已用"近似，排除可回收的 inactive/cached）
+        mem_used = (pg("Pages active") + pg("Pages wired down")
+                    + pg("Pages occupied by compressor")) * page
+    except Exception:
+        pass
+    swap_used = 0.0
+    m = re.search(r"used\s*=\s*([\d.]+)M", _sysctl("vm.swapusage"))
+    if m:
+        swap_used = float(m.group(1))
+    load_per_cpu = load1 / ncpu if ncpu else load1
+    mem_pct = round(100 * mem_used / mem_total) if mem_total else 0
+    return {
+        "load1": round(load1, 2), "load5": round(load5, 2), "ncpu": ncpu,
+        "loadPerCpu": round(load_per_cpu, 2),
+        "memTotalMB": round(mem_total / 1048576), "memUsedMB": round(mem_used / 1048576),
+        "memUsedPct": mem_pct, "swapUsedMB": round(swap_used),
+        # 提醒阈值：每核负载 > 1.5（CPU 已排队）或 swap > 2G（在换页）或内存 > 90%
+        "busy": load_per_cpu > 1.5 or swap_used > 2048 or mem_pct > 90,
+    }
+
+
+_STATS_CACHE = {"at": 0.0, "data": None}
+_STATS_LOCK = threading.Lock()
+
+
+def system_stats_cached():
+    with _STATS_LOCK:
+        if _STATS_CACHE["data"] is not None and time.time() - _STATS_CACHE["at"] < 2.0:
+            return _STATS_CACHE["data"]
+        data = system_stats()
+        _STATS_CACHE.update(at=time.time(), data=data)
+        return data
+
+
 PAGE_HEAD = (
     '<!doctype html><meta charset=utf-8>'
     '<meta name=viewport content="width=device-width,initial-scale=1">'
@@ -463,6 +523,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_web("index.html", cookie_tok=tok)
         if path == "/api/wake/sessions":
             return self._send(200, json.dumps(list_sessions_cached(), ensure_ascii=False),
+                              "application/json; charset=utf-8",
+                              extra_headers=[self._cookie(tok)])
+        if path == "/api/stats":
+            return self._send(200, json.dumps(system_stats_cached()),
                               "application/json; charset=utf-8",
                               extra_headers=[self._cookie(tok)])
         if path == "/api/browse":

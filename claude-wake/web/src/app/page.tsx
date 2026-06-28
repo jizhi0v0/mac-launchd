@@ -6,11 +6,13 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  Cpu,
   ExternalLink,
   Eye,
   EyeOff,
   Folder,
   Loader2,
+  MemoryStick,
   Moon,
   Play,
   Plus,
@@ -19,15 +21,18 @@ import {
   Square,
   Sun,
   Terminal,
+  TriangleAlert,
 } from "lucide-react";
 
 import {
   browse,
+  stats,
   wakeKill,
   wakeReapAll,
   wakeSessions,
   wakeStart,
   type BrowseData,
+  type SysStats,
   type WakeSession,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -74,6 +79,7 @@ export default function Page() {
   const [starting, setStarting] = useState<Set<string>>(new Set());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [wakeErr, setWakeErr] = useState<string | null>(null);
+  const [sys, setSys] = useState<SysStats | null>(null); // 机器负载
   const [dark, setDark] = useState(true);
   const loadSeq = useRef(0);
 
@@ -131,6 +137,26 @@ export default function Page() {
       clearTimeout(timer);
     };
   }, [refreshSessions]);
+
+  // 负载轮询：3s 一次（server 端 2s 缓存，开销小），唤醒前提醒机器吃不吃紧。
+  useEffect(() => {
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = async () => {
+      try {
+        const s = await stats();
+        if (!stop) setSys(s);
+      } catch {
+        /* 拿不到负载不影响主功能 */
+      }
+      if (!stop) timer = setTimeout(loop, 3000);
+    };
+    loop();
+    return () => {
+      stop = true;
+      clearTimeout(timer);
+    };
+  }, []);
 
   const navigate = useCallback((p: string) => {
     setFilter("");
@@ -246,10 +272,24 @@ export default function Page() {
           <h1 className="text-2xl font-semibold tracking-tight">🛟 claude-wake</h1>
           <p className="text-muted-foreground text-sm">选个目录，远程起一个 claude 会话</p>
         </div>
-        <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
-          {dark ? <Sun /> : <Moon />}
-        </Button>
+        <div className="flex items-center gap-2">
+          {sys && <StatBar sys={sys} />}
+          <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
+            {dark ? <Sun /> : <Moon />}
+          </Button>
+        </div>
       </header>
+
+      {sys?.busy && (
+        <div className="mb-5 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-600 dark:text-amber-400">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          <span>
+            机器负载偏高（每核 {sys.loadPerCpu}、内存 {sys.memUsedPct}%
+            {sys.swapUsedMB > 1024 && ` 、swap ${(sys.swapUsedMB / 1024).toFixed(1)}G`}）。
+            每个 claude 会话是个重 Node 进程，现在唤醒可能很慢甚至超时——建议先收掉些会话或等负载降下来再起。
+          </span>
+        </div>
+      )}
 
       {wakeErr && (
         <div className="border-destructive/40 text-destructive mb-5 rounded-lg border px-4 py-3 text-sm">
@@ -451,6 +491,33 @@ export default function Page() {
         </a>
       </footer>
     </main>
+  );
+}
+
+// 机器负载条：每核负载 + 内存% + swap（吃紧时变琥珀）。窄屏隐藏，靠下面的警告横幅。
+function StatBar({ sys }: { sys: SysStats }) {
+  return (
+    <div
+      className={cn(
+        "hidden items-center gap-3 rounded-md border px-2.5 py-1 text-xs sm:flex",
+        sys.busy
+          ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+          : "text-muted-foreground border-transparent",
+      )}
+    >
+      <span className="flex items-center gap-1" title={`load ${sys.load1} · ${sys.ncpu} 核`}>
+        <Cpu className="size-3.5" /> {sys.loadPerCpu}×
+      </span>
+      <span
+        className="flex items-center gap-1"
+        title={`${sys.memUsedMB} / ${sys.memTotalMB} MB`}
+      >
+        <MemoryStick className="size-3.5" /> {sys.memUsedPct}%
+      </span>
+      {sys.swapUsedMB > 1024 && (
+        <span title="swap 使用">swap {(sys.swapUsedMB / 1024).toFixed(1)}G</span>
+      )}
+    </div>
   );
 }
 
