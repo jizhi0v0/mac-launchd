@@ -352,6 +352,10 @@ def browse_json(abs_path, show_hidden=False):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "claude-wake"
+    # HTTP/1.1 → keep-alive：浏览器复用少数几条连接，而不是硬刷新时一次性开十几条。
+    # 所有响应都带 Content-Length（_send / _serve_web 都设了），keep-alive 不会错位。
+    protocol_version = "HTTP/1.1"
+    timeout = 30  # 闲置 keep-alive 连接 30s 自动断，别让线程一直挂着
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode()
@@ -599,13 +603,21 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, "not found\n", "text/plain; charset=utf-8")
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    # 默认监听 backlog 只有 5——硬刷新一次并发开十几条连接就溢出、被拒（curl 000 / tailscale 502）。
+    # 调大到 128，让突发连接排队而不是被拒。
+    request_queue_size = 128
+
+
 def main():
     if not TOKEN:
         sys.exit(f"[claude-wake] no token at {TOKEN_FILE} — 先跑 install.sh")
     if not WAKE_SH or not os.path.exists(WAKE_SH):
         sys.exit(f"[claude-wake] WAKE_SH 未设置或不存在: {WAKE_SH!r}")
     print(f"[claude-wake] listening on {HOST}:{PORT} (wake={WAKE_SH})", flush=True)
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    Server((HOST, PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
