@@ -346,8 +346,8 @@ export default function Page() {
   }, [fullPath]);
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:py-10">
-      <header className="mb-6 flex items-center justify-between gap-3">
+    <div className="min-h-screen">
+      <header className="flex items-center justify-between gap-3 px-5 pt-6 pb-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">🛟 claude-wake</h1>
           <p className="text-muted-foreground text-sm">选个目录，远程起一个 claude 会话</p>
@@ -361,7 +361,7 @@ export default function Page() {
       </header>
 
       {sys?.busy && (
-        <div className="mb-5 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-600 dark:text-amber-400">
+        <div className="mx-5 mb-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-600 dark:text-amber-400">
           <TriangleAlert className="mt-0.5 size-4 shrink-0" />
           <span>
             机器负载偏高（每核 {sys.loadPerCpu}、内存 {sys.memUsedPct}%
@@ -372,15 +372,16 @@ export default function Page() {
       )}
 
       {wakeErr && (
-        <div className="border-destructive/40 text-destructive mb-5 rounded-lg border px-4 py-3 text-sm">
+        <div className="border-destructive/40 text-destructive mx-5 mb-3 rounded-lg border px-4 py-3 text-sm">
           唤醒失败：{wakeErr}
         </div>
       )}
 
-      <div className="flex flex-col gap-6 md:flex-row md:items-start">
-        {/* 左栏：会话 + 正在发起的占位（无任何动静时不占位，浏览器吃满宽） */}
+      {/* App shell：会话独立成左侧全高栏（不再和文件浏览器挤同一居中块），主区吃满剩余宽度 */}
+      <div className="md:flex md:items-stretch">
+        {/* 左栏：会话；移动端为顶部块，桌面端为左侧全高栏 */}
         {(sessions.length > 0 || starting.size > 0) && (
-          <aside className="flex flex-col gap-2 md:w-72 md:shrink-0">
+          <aside className="flex flex-col gap-2 px-5 pb-6 md:w-72 md:shrink-0 md:border-r md:px-4 md:py-4">
             <div className="flex items-center justify-between px-1">
               <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
                 进行中 · {sessions.length + starting.size}
@@ -443,8 +444,8 @@ export default function Page() {
           </aside>
         )}
 
-        {/* 主区：Finder 列视图 */}
-        <div className="min-w-0 flex-1">
+        {/* 主区：Finder 列视图，吃满剩余宽度 */}
+        <main className="min-w-0 px-5 pb-10 md:flex-1 md:px-6 md:py-4">
           {/* 顶栏只放操作：导航靠点列 + 底部路径栏，不再要「上级」 */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={reload} title="刷新">
@@ -581,16 +582,16 @@ export default function Page() {
               {copied ? "已复制" : "复制路径"}
             </Button>
           </div>
-        </div>
+        </main>
       </div>
 
-      <footer className="text-muted-foreground/70 mt-10 text-center text-xs">
+      <footer className="text-muted-foreground/70 mt-10 px-5 pb-6 text-center text-xs">
         限根 $HOME · 可并存多个会话 · Next 16.3 preview + shadcn ·{" "}
         <a className="underline" href="/browse">
           纯 HTML 版
         </a>
       </footer>
-    </main>
+    </div>
   );
 }
 
