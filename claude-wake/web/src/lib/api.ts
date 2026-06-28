@@ -38,22 +38,75 @@ export async function browse(path: string, all: boolean): Promise<BrowseData> {
   return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 12000), "浏览");
 }
 
-// 在某相对路径目录起会话；返回 claude.ai/code 接管链接。path 为 "" → 根（$HOME，慢，慎用）。
-export async function wake(path: string): Promise<string> {
+// ---- 流式唤醒：start 立刻拿 job → 不断 poll 看详细链路 → 需要时 kill ----
+// 为什么不再用一次性阻塞 /api/wake：那个闷等、有超时、卡住没法中途收。改成三件套，
+// 前端能显示"冷启动→注册 RC→拿到链接"的具体进度，不存在超时，卡了可远程 kill。
+
+export type WakePhase =
+  | "booting" // pane 空白：claude 冷启动中
+  | "rendering" // TUI 起来了：正注册 RC 云连接、等 URL
+  | "ready" // 拿到接管链接
+  | "failed"; // RC 注册失败 banner
+
+// 一个 live 会话的实时状态（多会话：可并存任意多个）。
+export type WakeSession = {
+  id: string;
+  rc: string;
+  dir: string;
+  phase: WakePhase;
+  elapsed: number | null; // 起会话至今秒数；server 重启后/外部起的会话未知 → null
+  url: string | null;
+  tail: string[]; // 终端尾巴几行，直接显示
+};
+
+const FORM = {
+  "Content-Type": "application/x-www-form-urlencoded",
+  Accept: "application/json",
+};
+
+// 起一个【独立】后台会话，立刻返回 job(=会话 id)，不等 URL。可并存多个。path 为 "" → 默认 /tmp 空目录。
+export async function wakeStart(
+  path: string,
+): Promise<{ job: string; rc: string; dir: string }> {
   const r = await fetchT(
-    "/api/wake",
+    "/api/wake/start",
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
+      headers: FORM,
       body: new URLSearchParams(path ? { path } : {}),
       credentials: "same-origin",
     },
-    60000, // wake 起会话+抓 RC 链接可能要几十秒，给足
+    30000,
   );
-  const j = await jsonOrThrow(r, "唤醒");
-  if (!j.url) throw new Error("没拿到接管链接");
-  return j.url as string;
+  return jsonOrThrow(r, "起会话");
+}
+
+// 拉取所有 live 会话的实时状态。无超时概念——卡住的会话就一直停在某 phase，由用户对它点收掉。
+// 单次请求给 15s 网络超时（卡住抛错，调用方下个 tick 再试，不影响已有列表）。
+export async function wakeSessions(): Promise<WakeSession[]> {
+  const u = new URL("/api/wake/sessions", location.origin);
+  return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 15000), "查会话");
+}
+
+// 精准收掉【某一个】会话（本地进程 + 注销云端登记），不动其它并存会话。
+export async function wakeKill(job: string): Promise<void> {
+  await fetchT(
+    "/api/wake/kill",
+    {
+      method: "POST",
+      headers: FORM,
+      body: new URLSearchParams({ job }),
+      credentials: "same-origin",
+    },
+    20000,
+  );
+}
+
+// 一键收掉所有 live 会话。
+export async function wakeReapAll(): Promise<void> {
+  await fetchT(
+    "/api/wake/reap-all",
+    { method: "POST", headers: FORM, credentials: "same-origin" },
+    30000,
+  );
 }
