@@ -47,7 +47,17 @@ mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
 WAKE_RC_TAG="${WAKE_RC_TAG:-wake}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
-WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
+# 每次尝试等 URL 的上限（短！健康暖会话 ~5s 就出；超过即判这次失败→reap→重试下一次）。
+# 砍短是为了让 3 次重试塞进服务端 60s 超时内（冷启动首次必卡、第二次基本就成）。
+WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-18}"
+
+# 根因修复：LaunchAgent 亲自起的 tmux server 处在 launchd bootstrap 上下文，里面 claude 卡死、
+# 连它的 tmux 客户端命令也卡。所以 wake 绝不自己起 server —— 只挂到一个【在 GUI 会话里起好的】
+# 常驻 host server（专用 socket，由登录项/host 脚本保活，见 claude-wake-tmux-host）。
+# 固定 TMUX_TMPDIR 让 host 与 wake 命中同一个 socket。
+WAKE_TMUX_SOCK="${WAKE_TMUX_SOCK:-claude-wake}"
+export TMUX_TMPDIR="${WAKE_TMUX_TMPDIR:-/tmp}"
+T="$(command -v tmux) -L $WAKE_TMUX_SOCK"   # 所有 tmux 操作都走这个专用 server
 
 log() { printf '%s [claude-wake] %s\n' "$(date '+%F %T')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -58,7 +68,7 @@ CLAUDE_BIN="$(command -v claude || true)"
 
 reap() {
   local pat="claude --remote-control ${WAKE_RC_TAG}-"
-  tmux kill-session -t "$WAKE_SESSION" 2>/dev/null && log "reaped tmux session '$WAKE_SESSION'" || true
+  $T kill-session -t "$WAKE_SESSION" 2>/dev/null && log "reaped tmux session '$WAKE_SESSION'" || true
   # 两段式回收：① 先 SIGTERM 给 claude 机会优雅注销【云端】RC 登记（否则留服务端僵尸、
   # 空占 RC 槽，攒多了新会话就 "Session creation failed" #57715）；等几秒。② 还赖着的
   # （claude 可能扛 SIGTERM/SIGHUP）再 SIGKILL 强杀，保证【本地】不漏进程。
@@ -105,7 +115,11 @@ spawn() {
   # claude --remote-control 要 PTY，塞进 tmux。dir 走 tmux -c（不进内层命令串，
   # 避免任何引号/注入问题）；PATH+代理透传进内层 shell。
   local cmd="export PATH='$PATH'; ${px}exec '$CLAUDE_BIN' --remote-control '$rc'"
-  tmux new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
+  # 只挂到常驻 host server。若它没在跑（应由登录项/host 保活），这里会现起一个【坏上下文】的，
+  # 大概率卡——所以先检查，缺了就明确报错，别默默起个坏的。
+  $T has-session -t _host 2>/dev/null || $T list-sessions >/dev/null 2>&1 \
+    || die "tmux host server 没在跑（应由 claude-wake-tmux-host 保活）。先跑 host 脚本/登录项。"
+  $T new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
   log "spawned RC '$rc' @ $dir"
 }
 
@@ -113,7 +127,7 @@ spawn() {
 # 把进程调用栈 + 打开的连接/管道 dump 到日志，供事后定根因——这是唯一能抓到这种稀有竞态的办法。
 dump_hang() {
   local pid logf
-  pid=$(tmux list-panes -t "$WAKE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
+  pid=$($T list-panes -t "$WAKE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
   [ -n "$pid" ] || return 0
   logf="/tmp/claude-wake-hang-$(date +%Y%m%d-%H%M%S).log"
   {
@@ -126,19 +140,22 @@ dump_hang() {
 }
 
 # 盯 pane 直到出现接管链接。失败/卡死返回非 0（不 die，交给上层重试）。
-# 「空白 pane 卡死」早判：健康 claude 几秒就渲染 TUI，blank 撑到 15s = 启动 hang，
-# 别傻等满 ${WAKE_CAPTURE_TIMEOUT}s——早判→dump→reap→上层自动重试。
+# 按【墙钟时间】判定（不是循环次数）——守护进程里 tmux 命令偶尔慢，按次数会判太晚。
+# 健康 claude 几秒就渲染 TUI；pane 空白持续 ${WAKE_HANG_BLANK}s = 冷启动卡死，早判→dump→reap→上层重试。
+WAKE_HANG_BLANK="${WAKE_HANG_BLANK:-12}"
 capture_url() {
-  local i pane url lines
-  for i in $(seq 1 "$WAKE_CAPTURE_TIMEOUT"); do
-    pane=$(tmux capture-pane -t "$WAKE_SESSION" -p 2>/dev/null || true)
+  local start=$SECONDS blank_since=$SECONDS pane url lines now
+  while [ $((SECONDS - start)) -lt "$WAKE_CAPTURE_TIMEOUT" ]; do
+    pane=$($T capture-pane -t "$WAKE_SESSION" -p 2>/dev/null || true)
     printf '%s' "$pane" | grep -qiE 'remote.control failed|session creation failed' \
       && { log "RC 注册失败 banner"; dump_hang "$1"; reap; return 1; }
     url=$(printf '%s' "$pane" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1)
     [ -n "$url" ] && { printf '%s\n' "$url"; return 0; }
     lines=$(printf '%s' "$pane" | grep -c .)
-    if [ "$i" -ge 15 ] && [ "$lines" -lt 2 ]; then
-      log "pane 空白撑到 ${i}s → 判定启动卡死"; dump_hang "$1"; reap; return 1
+    now=$SECONDS
+    [ "$lines" -ge 2 ] && blank_since=$now   # 一渲染出内容就清零计时
+    if [ $((now - blank_since)) -ge "$WAKE_HANG_BLANK" ]; then
+      log "pane 空白持续 $((now - blank_since))s → 判定冷启动卡死"; dump_hang "$1"; reap; return 1
     fi
     sleep 1
   done
@@ -149,18 +166,20 @@ case "${1:-wake}" in
   wake)
     WDIR="${2:-$WAKE_DIR_DEFAULT}"
     reap
-    # 偶发启动卡死 → 自动重试一次（重试基本必成，免得你被 60s 卡死还得手点）
-    for attempt in 1 2; do
+    # 冷启动卡死 → 自动重试（reap 只杀会话不杀 tmux server，所以重试用的是已暖的 server，
+    # 第二次基本必成——这正是你说的"再跑就好"，做成对用户透明）。快判 ${WAKE_HANG_BLANK}s，
+    # 3 次也就 ~36s，容得下服务端 60s 超时。
+    for attempt in 1 2 3; do
       spawn "$WDIR"
       if url="$(capture_url "$WDIR")"; then printf '%s\n' "$url"; exit 0; fi
-      [ "$attempt" = 1 ] && log "第 1 次没起来，自动重试…"
+      [ "$attempt" -lt 3 ] && log "第 $attempt 次没起来（已 reap），自动重试…"
     done
-    die "连试两次都没起来（诊断见 /tmp/claude-wake-hang-*.log）"
+    die "连试三次都没起来（诊断见 /tmp/claude-wake-hang-*.log）"
     ;;
   reap)   reap ;;
   status)
-    if tmux has-session -t "$WAKE_SESSION" 2>/dev/null; then
-      tmux capture-pane -t "$WAKE_SESSION" -p 2>/dev/null \
+    if $T has-session -t "$WAKE_SESSION" 2>/dev/null; then
+      $T capture-pane -t "$WAKE_SESSION" -p 2>/dev/null \
         | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1 \
         || echo "wake session 在，但没抓到 URL"
     else
