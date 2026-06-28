@@ -109,25 +109,54 @@ spawn() {
   log "spawned RC '$rc' @ $dir"
 }
 
-# 盯 pane 直到出现 claude.ai/code 接管链接；看到失败 banner 立即报错。
-# 失败（注册失败 / 超时）时先 reap 掉这个起不来的会话，别让它（偶发卡死那种空白 claude）
-# 一直挂着空占资源/RC 槽，要等下次 wake 才被收。
+# claude 偶发启动卡死（pane 全程空白、RC 注册不了，~1/十几次、按需复现不出）。卡住的瞬间
+# 把进程调用栈 + 打开的连接/管道 dump 到日志，供事后定根因——这是唯一能抓到这种稀有竞态的办法。
+dump_hang() {
+  local pid logf
+  pid=$(tmux list-panes -t "$WAKE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
+  [ -n "$pid" ] || return 0
+  logf="/tmp/claude-wake-hang-$(date +%Y%m%d-%H%M%S).log"
+  {
+    echo "# claude-wake hang @ $(date)  pid=$pid  dir=${1:-?}"
+    echo "## 子进程"; ps -axo pid,ppid,stat,command | awk -v p="$pid" '$2==p'
+    echo "## sample 调用栈"; sample "$pid" 2 2>/dev/null
+    echo "## lsof（连接/管道）"; lsof -nP -p "$pid" 2>/dev/null
+  } >"$logf" 2>&1
+  log "卡死诊断已 dump → $logf（下次定根因看它）"
+}
+
+# 盯 pane 直到出现接管链接。失败/卡死返回非 0（不 die，交给上层重试）。
+# 「空白 pane 卡死」早判：健康 claude 几秒就渲染 TUI，blank 撑到 15s = 启动 hang，
+# 别傻等满 ${WAKE_CAPTURE_TIMEOUT}s——早判→dump→reap→上层自动重试。
 capture_url() {
-  local i pane url
+  local i pane url lines
   for i in $(seq 1 "$WAKE_CAPTURE_TIMEOUT"); do
     pane=$(tmux capture-pane -t "$WAKE_SESSION" -p 2>/dev/null || true)
     printf '%s' "$pane" | grep -qiE 'remote.control failed|session creation failed' \
-      && { reap; die "RC 注册失败（见 claude 调试日志 ~/.claude/logs）"; }
+      && { log "RC 注册失败 banner"; dump_hang "$1"; reap; return 1; }
     url=$(printf '%s' "$pane" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1)
     [ -n "$url" ] && { printf '%s\n' "$url"; return 0; }
+    lines=$(printf '%s' "$pane" | grep -c .)
+    if [ "$i" -ge 15 ] && [ "$lines" -lt 2 ]; then
+      log "pane 空白撑到 ${i}s → 判定启动卡死"; dump_hang "$1"; reap; return 1
+    fi
     sleep 1
   done
-  reap
-  die "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 session URL（已 reap）"
+  log "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 URL"; dump_hang "$1"; reap; return 1
 }
 
 case "${1:-wake}" in
-  wake)   reap; spawn "${2:-$WAKE_DIR_DEFAULT}"; capture_url ;;
+  wake)
+    WDIR="${2:-$WAKE_DIR_DEFAULT}"
+    reap
+    # 偶发启动卡死 → 自动重试一次（重试基本必成，免得你被 60s 卡死还得手点）
+    for attempt in 1 2; do
+      spawn "$WDIR"
+      if url="$(capture_url "$WDIR")"; then printf '%s\n' "$url"; exit 0; fi
+      [ "$attempt" = 1 ] && log "第 1 次没起来，自动重试…"
+    done
+    die "连试两次都没起来（诊断见 /tmp/claude-wake-hang-*.log）"
+    ;;
   reap)   reap ;;
   status)
     if tmux has-session -t "$WAKE_SESSION" 2>/dev/null; then
