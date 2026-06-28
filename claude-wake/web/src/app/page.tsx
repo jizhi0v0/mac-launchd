@@ -153,14 +153,41 @@ export default function Page() {
         <Button
           variant="outline"
           size="sm"
-          disabled={!data || data.atRoot}
+          disabled={!data || data.atRoot || loading}
           onClick={() => data?.parent != null && navigate(data.parent)}
         >
           <ChevronUp /> 上级
         </Button>
-        <code className="bg-muted text-muted-foreground min-w-0 flex-1 truncate rounded-md px-2.5 py-1.5 text-xs">
-          {data?.crumb ?? "~"}
-        </code>
+        {/* 面包屑：每一层都可点，快速跳到任意上级；最后一段是当前目录、不可点 */}
+        <nav className="bg-muted text-muted-foreground flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md px-2.5 py-1.5 text-xs whitespace-nowrap">
+          <button
+            onClick={() => navigate("")}
+            disabled={loading}
+            className="hover:text-foreground shrink-0 disabled:pointer-events-none"
+          >
+            ~
+          </button>
+          {(data?.rel ? data.rel.split("/") : []).map((seg, i, arr) => {
+            const target = arr.slice(0, i + 1).join("/");
+            const isLast = i === arr.length - 1;
+            return (
+              <span key={target} className="flex shrink-0 items-center gap-1">
+                <span className="opacity-40">/</span>
+                {isLast ? (
+                  <span className="text-foreground">{seg}</span>
+                ) : (
+                  <button
+                    onClick={() => navigate(target)}
+                    disabled={loading}
+                    className="hover:text-foreground disabled:pointer-events-none"
+                  >
+                    {seg}
+                  </button>
+                )}
+              </span>
+            );
+          })}
+        </nav>
         <Button variant="outline" size="sm" onClick={() => load(path, all)} title="刷新">
           <RotateCw className={cn(loading && "animate-spin")} />
         </Button>
@@ -198,7 +225,13 @@ export default function Page() {
       ) : dirs.length === 0 ? (
         <p className="text-muted-foreground px-1 py-8 text-sm">（无子目录）</p>
       ) : (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div
+          className={cn(
+            "grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3",
+            // loading 时把旧列表压暗并禁止点击——否则跳转途中还能点别的文件夹，造成竞态
+            loading && "pointer-events-none opacity-50",
+          )}
+        >
           {dirs.map((name) => {
             const cp = child(name);
             const busy = waking === cp;
