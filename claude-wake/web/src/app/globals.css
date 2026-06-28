@@ -85,6 +85,12 @@
     background: var(--background);
     color: var(--foreground);
   }
+  /* Tailwind v4 的 Preflight 把按钮默认 cursor 设成 default（v3 是 pointer），导致全站
+     按钮（Button + 文件夹行/面包屑/会话行等裸 <button>）悬停都没手型。统一补回，禁用态除外。 */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
 
 /* 细滚动条（Finder 列视图用）：默认 macOS "总是显示" 时那条又粗又丑，换成细的、半透明、悬停才明显。 */

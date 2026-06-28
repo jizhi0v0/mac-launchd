@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   CheckCircle2,
@@ -68,6 +68,10 @@ function phaseMeta(p: WakeSession["phase"]) {
 type Pending = { id: string; rc: string; dir: string; rel: string | null; started: number };
 type Col = { loading?: boolean; dirs?: string[]; error?: string };
 
+// 收掉后压制这条会话的宽限期：只在这段时间里挡住在途旧帧把它复活（防闪回）。≈ kill 请求超时(20s)。
+// 过了还在服务端帧里出现 = 这次收掉没成（进程没死），就放它回来，别让一个活会话永久隐身、没法再收。
+const KILL_GRACE_MS = 20000;
+
 export default function Page() {
   const [path, setPath] = useState("");
   const [all, setAll] = useState(false);
@@ -75,6 +79,7 @@ export default function Page() {
   const [filter, setFilter] = useState("");
   const [polled, setPolled] = useState<WakeSession[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
+  const [killed, setKilled] = useState<Map<string, number>>(new Map()); // id -> 收掉时刻；只压制 KILL_GRACE_MS 内，过期且服务端仍报这条=没收掉成，放它回来
   const [starting, setStarting] = useState<Set<string>>(new Set());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [wakeErr, setWakeErr] = useState<string | null>(null);
@@ -156,8 +161,10 @@ export default function Page() {
 
   const reload = useCallback(() => {
     inflight.current.clear();
-    setCols({}); // 清缓存 → effect 重新拉当前各列
-  }, []);
+    // 直接重拉当前各列：只清缓存不行——拉列的 effect 只依赖 colPrefixes/all，
+    // 清 cols 不改这俩，effect 不会重跑，列就空着不再回填（刷新「没反应」的真因）。
+    colPrefixes.forEach((p) => fetchCol(p, all));
+  }, [colPrefixes, all, fetchCol]);
   const toggleAll = useCallback(() => {
     inflight.current.clear();
     setCols({}); // 显示/隐藏点目录变了，各列内容都变，清缓存重拉
@@ -167,6 +174,17 @@ export default function Page() {
   // 把一帧组合状态 {sessions,stats} 落到 UI；并撤掉已被服务端确认的乐观占位。
   const applyState = useCallback((st: LiveState) => {
     const ss = st.sessions ?? [];
+    // 墓碑维护：收掉请求在途时，之前已发出的 SSE/poll 帧可能还带着这条会话，直接落帧会把它复活
+    // （消失→闪回→再消失）。两种情况撤掉墓碑：①服务端帧里不再有它（真没了，收掉成功）；
+    // ②超过宽限期（收掉没成、进程没死，别让它永久隐身——放回来让用户能看到并重试）。
+    setKilled((k) => {
+      if (k.size === 0) return k;
+      const now = Date.now();
+      const next = new Map(
+        [...k].filter(([id, t]) => ss.some((y) => y.id === id) && now - t < KILL_GRACE_MS),
+      );
+      return next.size === k.size ? k : next;
+    });
     setPolled(ss);
     if (st.stats) setSys(st.stats);
     setPending((p) => p.filter((x) => !ss.some((y) => y.id === x.id)));
@@ -273,6 +291,7 @@ export default function Page() {
 
   const doKill = useCallback(
     async (id: string) => {
+      setKilled((k) => new Map(k).set(id, Date.now()));
       setPending((p) => p.filter((x) => x.id !== id));
       setPolled((p) => p.filter((x) => x.id !== id));
       try {
@@ -286,6 +305,13 @@ export default function Page() {
   );
 
   const doKillAll = useCallback(async () => {
+    setKilled((k) => {
+      const n = new Map(k);
+      const t = Date.now();
+      for (const s of polled) n.set(s.id, t);
+      for (const p of pending) n.set(p.id, t);
+      return n;
+    });
     setPending([]);
     setPolled([]);
     try {
@@ -294,7 +320,7 @@ export default function Page() {
       /* 尽力而为 */
     }
     refreshOnce();
-  }, [refreshOnce]);
+  }, [refreshOnce, polled, pending]);
 
   const toggleTheme = () => {
     const d = !dark;
@@ -317,8 +343,10 @@ export default function Page() {
         tail: [],
       });
     for (const s of polled) map.set(s.id, s);
-    return [...map.values()].sort((a, b) => (a.elapsed ?? 1e9) - (b.elapsed ?? 1e9));
-  }, [pending, polled]);
+    return [...map.values()]
+      .filter((s) => !killed.has(s.id)) // 墓碑里的（刚收掉、服务端帧还没追上）不显示
+      .sort((a, b) => (a.elapsed ?? 1e9) - (b.elapsed ?? 1e9));
+  }, [pending, polled, killed]);
 
   // 按目录分组（claude app 左栏样式）。组顺序 = 会话顺序（新的在前）。
   const groups = useMemo(() => {
@@ -344,6 +372,80 @@ export default function Page() {
       })
       .catch(() => {});
   }, [fullPath]);
+
+  // 移动端的抽屉式目录树：竖向逐层展开，免左右滑。点行展开/收起（=选中该目录 / 回上一级），
+  // 点 ▶ 在该目录唤醒。复用列视图同一套 cols 缓存与 path 链——展开某目录即 navigate 到它，
+  // 拉它子项的活照旧交给既有 effect（colPrefixes 变了就拉），所以这里只管按缓存递归渲染。
+  const renderTree = (prefix: string, depth: number): ReactNode => {
+    const col = cols[prefix];
+    const pad = { paddingLeft: depth * 16 + 10 };
+    if (!col || (col.dirs === undefined && !col.error)) {
+      return (
+        <div className="text-muted-foreground flex items-center gap-2 py-2 text-sm" style={pad}>
+          <Loader2 className="size-4 animate-spin" /> 加载中…
+        </div>
+      );
+    }
+    if (col.error) {
+      return (
+        <div className="text-destructive flex flex-col items-start gap-2 py-2 text-xs" style={pad}>
+          <span className="break-words">{col.error}</span>
+          <Button variant="outline" size="sm" onClick={() => fetchCol(prefix, all)}>
+            <RotateCw /> 重试
+          </Button>
+        </div>
+      );
+    }
+    const items = (col.dirs ?? []).filter((n) => !f || n.toLowerCase().includes(f));
+    if (items.length === 0) {
+      return (
+        <p className="text-muted-foreground py-2 text-xs" style={pad}>
+          （空）
+        </p>
+      );
+    }
+    return items.map((name) => {
+      const childPath = prefix ? `${prefix}/${name}` : name;
+      const open = path === childPath || path.startsWith(childPath + "/");
+      const busy = starting.has(childPath);
+      return (
+        <div key={childPath}>
+          <div
+            className={cn(
+              "flex items-center",
+              open ? "bg-accent text-accent-foreground" : "active:bg-muted/60",
+            )}
+          >
+            <button
+              onClick={() => navigate(open ? prefix : childPath)}
+              className="flex min-w-0 flex-1 items-center gap-2 py-2.5 pr-2 text-left text-sm"
+              style={pad}
+            >
+              <ChevronRight
+                className={cn(
+                  "text-muted-foreground/60 size-4 shrink-0 transition-transform",
+                  open && "rotate-90",
+                )}
+              />
+              <Folder className="text-muted-foreground size-4 shrink-0" />
+              <span className="truncate">{name}</span>
+            </button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="mr-1 size-8 shrink-0"
+              disabled={busy}
+              title={`在 ${name} 唤醒`}
+              onClick={() => doWake(childPath, childPath)}
+            >
+              {busy ? <Loader2 className="animate-spin" /> : <Play />}
+            </Button>
+          </div>
+          {open && renderTree(childPath, depth + 1)}
+        </div>
+      );
+    });
+  };
 
   return (
     <div className="min-h-screen">
@@ -464,16 +566,27 @@ export default function Page() {
                 className="border-input bg-background focus-visible:ring-ring/50 h-9 w-full rounded-md border pr-3 pl-9 text-sm outline-none focus-visible:ring-[3px]"
               />
             </div>
-            <Button size="sm" disabled={starting.has(".")} onClick={() => doWake(here, ".")}>
+            {/* 桌面端靠悬停某目录点 ▶ 唤醒，这按钮多余；只在移动端（无悬停、点不出 ▶）留一个唤醒当前目录的入口 */}
+            <Button
+              size="sm"
+              className="md:hidden"
+              disabled={starting.has(".")}
+              onClick={() => doWake(here, ".")}
+            >
               {starting.has(".") ? <Loader2 className="animate-spin" /> : <Play />}
               在此唤醒
             </Button>
           </div>
 
-          {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒 */}
+          {/* 移动端：抽屉式目录树（竖向逐层展开，免左右滑）。桌面切回下面的 Finder 列视图 */}
+          <div className="cw-scroll bg-card h-[62vh] overflow-y-auto rounded-lg border md:hidden">
+            {renderTree("", 0)}
+          </div>
+
+          {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒。仅桌面 */}
           <div
             ref={scrollRef}
-            className="cw-scroll bg-card flex h-[62vh] overflow-x-auto rounded-lg border"
+            className="cw-scroll bg-card hidden h-[62vh] overflow-x-auto rounded-lg border md:flex"
           >
             {colPrefixes.map((prefix, k) => {
               const selected = segs[k]; // 本列里高亮的子目录（指向下一列）；最后一列无
@@ -655,25 +768,11 @@ function SessionRow({
         <div className="flex flex-col gap-2.5 px-2.5 pt-0 pb-3">
           <p className="text-muted-foreground font-mono text-[10px] break-all">{s.rc}</p>
 
-          {s.phase === "ready" && s.url ? (
-            <>
-              <a
-                href={s.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-muted-foreground hover:text-foreground font-mono text-[11px] break-all underline"
-              >
-                {s.url}
-              </a>
-              <Button size="sm" onClick={() => window.open(s.url!, "_blank")}>
-                <ExternalLink /> 在 Claude 接管
-              </Button>
-            </>
-          ) : s.phase === "failed" ? (
+          {s.phase === "failed" ? (
             <p className="text-destructive text-xs">
               RC 注册失败：claude 起来了但云连接被拒（多为 keychain 登录态失效，需本机重登一次）。
             </p>
-          ) : (
+          ) : s.phase !== "ready" ? (
             <>
               <ol className="flex flex-col gap-1 text-xs">
                 {STEPS.map((label, i) => {
@@ -709,11 +808,24 @@ function SessionRow({
                 </pre>
               )}
             </>
-          )}
+          ) : null}
 
-          <Button variant="destructive" size="sm" className="self-start" onClick={onKill}>
-            <Square /> 收掉
-          </Button>
+          {/* 操作一行：就绪了就把「接管」和「收掉」并排（URL 不再单独列一行，点接管即打开） */}
+          <div className="flex gap-2">
+            {s.phase === "ready" && s.url && (
+              <Button size="sm" className="flex-1" onClick={() => window.open(s.url!, "_blank")}>
+                <ExternalLink /> 接管
+              </Button>
+            )}
+            <Button
+              variant="destructive"
+              size="sm"
+              className={cn(s.phase === "ready" && s.url ? "shrink-0" : "self-start")}
+              onClick={onKill}
+            >
+              <Square /> 收掉
+            </Button>
+          </div>
         </div>
       )}
     </div>
