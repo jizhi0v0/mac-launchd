@@ -86,3 +86,23 @@
     color: var(--foreground);
   }
 }
+
+/* 细滚动条（Finder 列视图用）：默认 macOS "总是显示" 时那条又粗又丑，换成细的、半透明、悬停才明显。 */
+.cw-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+}
+.cw-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.cw-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cw-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+  border-radius: 9999px;
+}
+.cw-scroll:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+}

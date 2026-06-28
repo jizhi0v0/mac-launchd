@@ -464,14 +464,15 @@ export default function Page() {
           {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒 */}
           <div
             ref={scrollRef}
-            className="bg-card flex max-h-[62vh] min-h-[16rem] divide-x overflow-x-auto rounded-lg border"
+            className="cw-scroll bg-card flex h-[62vh] divide-x overflow-x-auto rounded-lg border"
           >
             {colPrefixes.map((prefix, k) => {
               const selected = segs[k]; // 本列里高亮的子目录（指向下一列）；最后一列无
               const col = cols[prefix];
               const items = (col?.dirs ?? []).filter((n) => !f || n.toLowerCase().includes(f));
               return (
-                <div key={prefix || "~"} className="w-56 shrink-0 overflow-y-auto">
+                // 固定容器高度 + flex 默认 align-stretch → 每列撑满全高，列间分割线整条到底（短内容也有线）
+                <div key={prefix || "~"} className="cw-scroll w-56 shrink-0 overflow-y-auto">
                   {col?.error ? (
                     <div className="text-destructive flex flex-col items-start gap-2 p-3 text-xs">
                       <span className="break-words">{col.error}</span>
