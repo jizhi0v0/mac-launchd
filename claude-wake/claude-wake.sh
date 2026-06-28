@@ -37,7 +37,12 @@ fi
 # 走 ?dir=（server 的 /dirs 选文件夹）单次覆盖即可。
 WAKE_DIR_DEFAULT="${WAKE_DIR:-/tmp/claude-wake-cwd}"
 mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
-WAKE_RC_NAME="${WAKE_RC_NAME:-wake-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
+# RC 名 = wake-<主机> 前缀 + 每次唯一后缀（spawn 里拼）。
+# - claude 默认就开 RC（settings 的 remoteControlAtStartup），加 --remote-control 只为拿一个
+#   「我们可控、可精准回收」的名字，不是为了开启 RC。
+# - 唯一后缀：避免复用同名撞上服务端没回收的残留注册（#57715 那类 "Session creation failed"）。
+# - wake-<主机> 前缀：让 reap 能按前缀只杀 wake 起的 RC，不误伤你手头别的 claude。
+WAKE_RC_PREFIX="${WAKE_RC_PREFIX:-wake-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
 WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
@@ -54,8 +59,11 @@ CLAUDE_BIN="$(command -v claude || true)"
 
 reap() {
   tmux kill-session -t "$WAKE_SESSION" 2>/dev/null && log "reaped tmux session '$WAKE_SESSION'" || true
-  # kill-session 的 SIGHUP claude 可能扛得住 → 按 RC 名兜底收残留
-  pkill -f "claude --remote-control $WAKE_RC_NAME" 2>/dev/null && log "killed stray claude" || true
+  # 真 bug 修复：旧版发 SIGTERM，claude 跟扛 SIGHUP 一样扛住 → 漏成常驻僵尸、空占 RC 槽
+  # （槽位只进不出，攒多了新会话就 "Session creation failed"）。改 -KILL 杀不掉才怪。
+  # 按 RC 名前缀匹配：含本次会话 + 跨次残留的所有 wake RC（新旧后缀都覆盖），且前缀只命中
+  # 本工具起的，绝不误伤你手头别的 claude / 桌面 App 会话。
+  pkill -KILL -f "claude --remote-control ${WAKE_RC_PREFIX}" 2>/dev/null && log "killed stray wake RC" || true
 }
 
 spawn() {
@@ -86,11 +94,13 @@ spawn() {
     log "no oauth-token file → 退回继承本机登录态（refreshToken 一废即失效）"
   fi
 
+  # 每次唯一的 RC 名：前缀 + 时间戳 + 随机（openssl 没有就退回 PID），见 WAKE_RC_PREFIX 注释。
+  local rc="${WAKE_RC_PREFIX}-$(date +%s)$(openssl rand -hex 2 2>/dev/null || printf '%s' "$$")"
   # claude --remote-control 要 PTY，塞进 tmux。dir 走 tmux -c（不进内层命令串，
   # 避免任何引号/注入问题）；PATH+代理+凭据透传进内层 shell。
-  local cmd="export PATH='$PATH'; ${tok}${px}exec '$CLAUDE_BIN' --remote-control '$WAKE_RC_NAME'"
+  local cmd="export PATH='$PATH'; ${tok}${px}exec '$CLAUDE_BIN' --remote-control '$rc'"
   tmux new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
-  log "spawned RC '$WAKE_RC_NAME' @ $dir"
+  log "spawned RC '$rc' @ $dir"
 }
 
 # 盯 pane 直到出现 claude.ai/code 接管链接；看到失败 banner 立即报错。
