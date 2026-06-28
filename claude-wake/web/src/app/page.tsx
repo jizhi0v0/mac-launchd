@@ -185,8 +185,11 @@ export default function Page() {
       </div>
 
       {error ? (
-        <div className="border-destructive/40 text-destructive rounded-lg border px-4 py-3 text-sm">
-          {error}
+        <div className="border-destructive/40 text-destructive flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm">
+          <span className="min-w-0 break-words">{error}</span>
+          <Button variant="outline" size="sm" onClick={() => load(path, all)}>
+            <RotateCw /> 重试
+          </Button>
         </div>
       ) : loading && !data ? (
         <div className="text-muted-foreground flex items-center gap-2 px-1 py-8 text-sm">

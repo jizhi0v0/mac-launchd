@@ -17,24 +17,42 @@ async function jsonOrThrow(r: Response, what: string) {
   return j;
 }
 
+// 带超时的 fetch：卡住就 abort 抛错，避免 UI 无限转圈（远程链路抖动时尤其重要）。
+async function fetchT(input: URL | string, init: RequestInit, ms: number) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal });
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") throw new Error(`请求超时（${ms / 1000}s）`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export async function browse(path: string, all: boolean): Promise<BrowseData> {
   const u = new URL("/api/browse", location.origin);
   if (path) u.searchParams.set("path", path);
   if (all) u.searchParams.set("all", "1");
-  return jsonOrThrow(await fetch(u, { credentials: "same-origin" }), "浏览");
+  return jsonOrThrow(await fetchT(u, { credentials: "same-origin" }, 12000), "浏览");
 }
 
 // 在某相对路径目录起会话；返回 claude.ai/code 接管链接。path 为 "" → 根（$HOME，慢，慎用）。
 export async function wake(path: string): Promise<string> {
-  const r = await fetch("/api/wake", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
+  const r = await fetchT(
+    "/api/wake",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams(path ? { path } : {}),
+      credentials: "same-origin",
     },
-    body: new URLSearchParams(path ? { path } : {}),
-    credentials: "same-origin",
-  });
+    60000, // wake 起会话+抓 RC 链接可能要几十秒，给足
+  );
   const j = await jsonOrThrow(r, "唤醒");
   if (!j.url) throw new Error("没拿到接管链接");
   return j.url as string;
