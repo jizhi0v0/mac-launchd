@@ -37,18 +37,17 @@ fi
 # 走 ?dir=（server 的 /dirs 选文件夹）单次覆盖即可。
 WAKE_DIR_DEFAULT="${WAKE_DIR:-/tmp/claude-wake-cwd}"
 mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
-# RC 名 = wake-<主机> 前缀 + 每次唯一后缀（spawn 里拼）。
+# RC 名 = wake-<工作目录名>-<随机>（spawn 里拼）。
 # - claude 默认就开 RC（settings 的 remoteControlAtStartup），加 --remote-control 只为拿一个
-#   「我们可控、可精准回收」的名字，不是为了开启 RC。
-# - 唯一后缀：避免复用同名撞上服务端没回收的残留注册（#57715 那类 "Session creation failed"）。
-# - wake-<主机> 前缀：让 reap 能按前缀只杀 wake 起的 RC，不误伤你手头别的 claude。
-WAKE_RC_PREFIX="${WAKE_RC_PREFIX:-wake-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
+#   「我们可控、可精准回收、App 里看得懂」的名字，不是为了开启 RC。
+# - 目录名放前面：App 会话列表会截断，把目录名摆前面才能一眼看出这会话在哪个项目
+#   （之前是 wake-<主机>-<时间戳>，截断后只剩主机，看不出目录）。
+# - 随机后缀：每次唯一，避免复用同名撞上服务端没回收的残留登记（#57715）。
+# - wake- 前缀：供 reap 精准匹配（你别的 claude / 桌面 App 会话都不用 --remote-control wake-）。
+WAKE_RC_TAG="${WAKE_RC_TAG:-wake}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
 WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
-# 给无人值守 wake 会话用的长效 Anthropic 凭据（claude setup-token 签的，写进这个文件）。
-# 不设/文件不存在 → 退回继承本机交互登录态（几小时刷一次，refreshToken 一废就得人肉重登）。
-WAKE_OAUTH_FILE="${WAKE_OAUTH_FILE:-$HOME/.config/claude-wake/oauth-token}"
 
 log() { printf '%s [claude-wake] %s\n' "$(date '+%F %T')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -58,12 +57,20 @@ CLAUDE_BIN="$(command -v claude || true)"
 [ -n "$CLAUDE_BIN" ] || die "PATH 里找不到 claude（应在 ~/.local/bin）"
 
 reap() {
+  local pat="claude --remote-control ${WAKE_RC_TAG}-"
   tmux kill-session -t "$WAKE_SESSION" 2>/dev/null && log "reaped tmux session '$WAKE_SESSION'" || true
-  # 真 bug 修复：旧版发 SIGTERM，claude 跟扛 SIGHUP 一样扛住 → 漏成常驻僵尸、空占 RC 槽
-  # （槽位只进不出，攒多了新会话就 "Session creation failed"）。改 -KILL 杀不掉才怪。
-  # 按 RC 名前缀匹配：含本次会话 + 跨次残留的所有 wake RC（新旧后缀都覆盖），且前缀只命中
-  # 本工具起的，绝不误伤你手头别的 claude / 桌面 App 会话。
-  pkill -KILL -f "claude --remote-control ${WAKE_RC_PREFIX}" 2>/dev/null && log "killed stray wake RC" || true
+  # 两段式回收：① 先 SIGTERM 给 claude 机会优雅注销【云端】RC 登记（否则留服务端僵尸、
+  # 空占 RC 槽，攒多了新会话就 "Session creation failed" #57715）；等几秒。② 还赖着的
+  # （claude 可能扛 SIGTERM/SIGHUP）再 SIGKILL 强杀，保证【本地】不漏进程。
+  # 按 wake- 前缀匹配：含本次 + 跨次残留所有 wake RC；前缀只命中本工具起的，不误伤别的 claude。
+  if pkill -TERM -f "$pat" 2>/dev/null; then
+    log "TERM wake RC (等其优雅注销云端登记)"
+    local i; for i in 1 2 3 4 5 6 7 8; do
+      pgrep -f "$pat" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
+  fi
+  pkill -KILL -f "$pat" 2>/dev/null && log "KILL 残留 wake RC" || true
 }
 
 spawn() {
@@ -84,21 +91,20 @@ spawn() {
     log "no system HTTPS proxy (direct)"
   fi
 
-  # 长效凭据：有就注入 CLAUDE_CODE_OAUTH_TOKEN，claude 用它而非 keychain，和本机交互
-  # 登录态彻底解耦（人肉重登/换号都不影响 wake）。没有就静默退回继承登录态。
-  local tok=""
-  if [ -r "$WAKE_OAUTH_FILE" ] && [ -s "$WAKE_OAUTH_FILE" ]; then
-    tok="export CLAUDE_CODE_OAUTH_TOKEN='$(cat "$WAKE_OAUTH_FILE")'; "
-    log "using long-lived oauth token from $WAKE_OAUTH_FILE"
-  else
-    log "no oauth-token file → 退回继承本机登录态（refreshToken 一废即失效）"
-  fi
+  # 凭据：用本机 keychain 登录态（跟 Claude App 一样），不注入 CLAUDE_CODE_OAUTH_TOKEN。
+  # 为什么不用 setup-token：它是 inference-only、缺 user:sessions:claude_code scope，
+  # 开不了 RC（"Session creation failed"，#33105）——而 wake 的全部意义就是 RC。
+  # 代价：keychain 登录靠 refreshToken，长期无人值守、refreshToken 一废需人肉重登一次；
+  # 但 RC 没有长效 full-scope token 这个选项，只能这样。
 
-  # 每次唯一的 RC 名：前缀 + 时间戳 + 随机（openssl 没有就退回 PID），见 WAKE_RC_PREFIX 注释。
-  local rc="${WAKE_RC_PREFIX}-$(date +%s)$(openssl rand -hex 2 2>/dev/null || printf '%s' "$$")"
+  # RC 名 = wake-<工作目录名>-<随机>，见 WAKE_RC_TAG 注释。目录名清洗掉非常规字符、限长，
+  # 让 App 列表一眼看出会话在哪个项目；随机后缀保证每次唯一。
+  local dname; dname=$(basename "$dir" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-28)
+  [ -n "$dname" ] || dname="dir"
+  local rc="${WAKE_RC_TAG}-${dname}-$(openssl rand -hex 3 2>/dev/null || printf '%s' "$$")"
   # claude --remote-control 要 PTY，塞进 tmux。dir 走 tmux -c（不进内层命令串，
-  # 避免任何引号/注入问题）；PATH+代理+凭据透传进内层 shell。
-  local cmd="export PATH='$PATH'; ${tok}${px}exec '$CLAUDE_BIN' --remote-control '$rc'"
+  # 避免任何引号/注入问题）；PATH+代理透传进内层 shell。
+  local cmd="export PATH='$PATH'; ${px}exec '$CLAUDE_BIN' --remote-control '$rc'"
   tmux new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
   log "spawned RC '$rc' @ $dir"
 }

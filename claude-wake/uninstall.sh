@@ -3,16 +3,11 @@ set -euo pipefail
 
 LABEL="com.jizhi.claude-wake"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-TC_LABEL="com.jizhi.claude-wake-tokencheck"
-TC_DST="$HOME/Library/LaunchAgents/${TC_LABEL}.plist"
 UID_NUM="$(id -u)"
 PORT="${WAKE_PORT:-8765}"
 
 launchctl bootout "gui/$UID_NUM" "$PLIST_DST" 2>/dev/null || true
 rm -f "$PLIST_DST"
-
-launchctl bootout "gui/$UID_NUM" "$TC_DST" 2>/dev/null || true
-rm -f "$TC_DST"
 
 # 收掉 tailscale serve 映射。优先精确关掉本端口；不行再整体 reset
 # （装它时 serve 配置本是空的，reset 只清掉我们这一条）。
