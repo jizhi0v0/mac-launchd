@@ -8,9 +8,15 @@
 # 断链问题。而这个触发器本身不持有云连接（只是本地被 tailscale/surge 转进来的一次
 # 性调用），所以抖动锁不住它。
 #
-# 用法：claude-wake.sh wake [dir]   # 起新会话，stdout 输出接管 URL
-#       claude-wake.sh status       # 当前 wake 会话的 URL（若在）
-#       claude-wake.sh reap         # 收掉当前 wake 会话
+# 多会话：每次唤醒一个独立 tmux 会话 cw-<id>，可并存任意多个，全部按 <id> 寻址、互不影响。
+# 用法：claude-wake.sh wake [dir]      # 阻塞式：起独立会话 + 等到 URL 打到 stdout（Shortcut/CLI）
+#       claude-wake.sh spawn-bg [dir]  # 起独立会话立刻返回，回 id=/rc=/dir=（SPA 流式起会话用）
+#       claude-wake.sh peek  <id>      # 打印该会话 pane 内容（server 轮询判进度用）
+#       claude-wake.sh alive <id>      # 该会话还在不在（yes/no）
+#       claude-wake.sh list            # 所有 live 会话：每行 id<TAB>rc<TAB>dir
+#       claude-wake.sh status          # 所有 live 会话的 URL：每行 rc<TAB>dir<TAB>url
+#       claude-wake.sh reap [id] [rc]  # 精准收一个会话；无 id = 全部收（= reap-all）
+#       claude-wake.sh reap-all        # 全部收掉（卸载用）
 #
 # stdout 只放 URL（成功时）；所有日志走 stderr，别污染给 HTTP 前端的返回。
 
@@ -45,7 +51,11 @@ mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
 # - 随机后缀：每次唯一，避免复用同名撞上服务端没回收的残留登记（#57715）。
 # - wake- 前缀：供 reap 精准匹配（你别的 claude / 桌面 App 会话都不用 --remote-control wake-）。
 WAKE_RC_TAG="${WAKE_RC_TAG:-wake}"
-WAKE_SESSION="${WAKE_SESSION:-wake}"
+# 多会话：每次唤醒一个【独立】tmux 会话 cw-<id>（id 随机），互不影响，可并存任意多个。
+# 旧的"固定一个 wake 会话、新唤醒先 reap 掉旧的"模型已废弃——那样第二次唤醒会杀掉你正在
+# 接管使用的第一个会话。现在每个会话独立寻址，reap 只精准收指定 id，不波及其它。
+WAKE_SESS_PREFIX="${WAKE_SESS_PREFIX:-cw-}"
+sess() { printf '%s%s' "$WAKE_SESS_PREFIX" "$1"; }   # id → tmux 会话名
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
 # 等 URL 的上限。放宽到 45s：别误杀"其实已注册 RC、只是 URL 慢一两拍"的好会话——
 # 误杀会在云端留一个 archived 尸体。真卡死由下面的"空白早判"快速识别，不靠这个超时。
@@ -66,21 +76,41 @@ command -v tmux >/dev/null || die "需要 tmux: brew install tmux"
 CLAUDE_BIN="$(command -v claude || true)"
 [ -n "$CLAUDE_BIN" ] || die "PATH 里找不到 claude（应在 ~/.local/bin）"
 
-reap() {
-  local pat="claude --remote-control ${WAKE_RC_TAG}-"
-  $T kill-session -t "$WAKE_SESSION" 2>/dev/null && log "reaped tmux session '$WAKE_SESSION'" || true
-  # 两段式回收：① 先 SIGTERM 给 claude 机会优雅注销【云端】RC 登记（否则留服务端僵尸、
-  # 空占 RC 槽，攒多了新会话就 "Session creation failed" #57715）；等几秒。② 还赖着的
-  # （claude 可能扛 SIGTERM/SIGHUP）再 SIGKILL 强杀，保证【本地】不漏进程。
-  # 按 wake- 前缀匹配：含本次 + 跨次残留所有 wake RC；前缀只命中本工具起的，不误伤别的 claude。
+# 两段式回收一个 RC 进程：先 SIGTERM 给 claude 机会优雅注销【云端】RC 登记（否则留服务端
+# 僵尸、空占 RC 槽，攒多了新会话就 "Session creation failed" #57715）、等几秒；还赖着的
+# （claude 可能扛 SIGTERM/SIGHUP）再 SIGKILL 兜底，保证【本地】不漏进程。pat 必须能精准
+# 命中目标，别误伤别的 claude / 其它并存的 wake 会话。
+kill_rc_proc() {
+  local pat="$1"
   if pkill -TERM -f "$pat" 2>/dev/null; then
-    log "TERM wake RC (等其优雅注销云端登记)"
+    log "TERM RC（等其注销云端登记）: $pat"
     local i; for i in 1 2 3 4 5 6 7 8; do
       pgrep -f "$pat" >/dev/null 2>&1 || break
       sleep 0.5
     done
   fi
-  pkill -KILL -f "$pat" 2>/dev/null && log "KILL 残留 wake RC" || true
+  pkill -KILL -f "$pat" 2>/dev/null && log "KILL 残留 RC: $pat" || true
+}
+
+# 精准收【一个】会话：读它的 RC 名（spawn 时存进 tmux @rc 选项），kill 掉 tmux 会话，再两段式
+# 杀掉【正好这一个】RC 进程——不波及其它并存的 wake 会话。rc 也可由调用方直接给（server 有记账）。
+reap_one() {
+  local id="$1" rc="${2:-}" s
+  s="$(sess "$id")"
+  [ -n "$rc" ] || rc="$($T show-options -t "$s" -v @rc 2>/dev/null || true)"
+  $T kill-session -t "$s" 2>/dev/null && log "reaped tmux session '$s'" || true
+  if [ -n "$rc" ]; then
+    kill_rc_proc "claude --remote-control $rc"
+  else
+    log "reap $id：没拿到 RC 名（会话可能已没），跳过进程清理"
+  fi
+}
+
+# 全部收掉（卸载 / 「全部收掉」兜底用）：杀所有 cw-* 会话 + 所有 wake- RC。
+reap_all() {
+  $T list-sessions -F '#{session_name}' 2>/dev/null | grep "^$WAKE_SESS_PREFIX" \
+    | while read -r s; do $T kill-session -t "$s" 2>/dev/null && log "reaped '$s'" || true; done
+  kill_rc_proc "claude --remote-control ${WAKE_RC_TAG}-"
 }
 
 spawn() {
@@ -111,27 +141,36 @@ spawn() {
   # 让 App 列表一眼看出会话在哪个项目；随机后缀保证每次唯一。
   local dname; dname=$(basename "$dir" | LC_ALL=C tr -cd 'A-Za-z0-9._-' | cut -c1-28)
   [ -n "$dname" ] || dname="dir"
-  local rc="${WAKE_RC_TAG}-${dname}-$(openssl rand -hex 3 2>/dev/null || printf '%s' "$$")"
+  # SESSION_ID / RC_NAME 是全局（非 local）——spawn-bg 起完即退，要把 id/rc 回给调用方
+  # （server）记账、展示、精准回收。id = 随机 hex；tmux 会话 cw-<id>；RC 名 wake-<目录名>-<id>
+  # （目录名给 App 列表一眼看出项目，id 给机器精准匹配）。
+  SESSION_ID="$(openssl rand -hex 3 2>/dev/null || printf '%s' "$$")"
+  RC_NAME="${WAKE_RC_TAG}-${dname}-${SESSION_ID}"
   # claude --remote-control 要 PTY，塞进 tmux。dir 走 tmux -c（不进内层命令串，
   # 避免任何引号/注入问题）；PATH+代理透传进内层 shell。
-  local cmd="export PATH='$PATH'; ${px}exec '$CLAUDE_BIN' --remote-control '$rc'"
+  local cmd="export PATH='$PATH'; ${px}exec '$CLAUDE_BIN' --remote-control '$RC_NAME'"
   # 只挂到常驻 host server。若它没在跑（应由登录项/host 保活），这里会现起一个【坏上下文】的，
   # 大概率卡——所以先检查，缺了就明确报错，别默默起个坏的。
   $T has-session -t _host 2>/dev/null || $T list-sessions >/dev/null 2>&1 \
     || die "tmux host server 没在跑（应由 claude-wake-tmux-host 保活）。先跑 host 脚本/登录项。"
-  $T new-session -d -s "$WAKE_SESSION" -x 220 -y 50 -c "$dir" "$cmd"
-  log "spawned RC '$rc' @ $dir"
+  local s; s="$(sess "$SESSION_ID")"
+  $T new-session -d -s "$s" -x 220 -y 50 -c "$dir" "$cmd"
+  # 把 RC 名和目录记到会话选项上，供 list / reap_one / status 之后读取（server 重启也不丢）。
+  $T set-option -t "$s" @rc "$RC_NAME" >/dev/null 2>&1 || true
+  $T set-option -t "$s" @dir "$dir" >/dev/null 2>&1 || true
+  log "spawned '$s' RC '$RC_NAME' @ $dir"
 }
 
 # claude 偶发启动卡死（pane 全程空白、RC 注册不了，~1/十几次、按需复现不出）。卡住的瞬间
 # 把进程调用栈 + 打开的连接/管道 dump 到日志，供事后定根因——这是唯一能抓到这种稀有竞态的办法。
 dump_hang() {
-  local pid logf
-  pid=$($T list-panes -t "$WAKE_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
+  local id="$1" pid logf s
+  s="$(sess "$id")"
+  pid=$($T list-panes -t "$s" -F '#{pane_pid}' 2>/dev/null | head -1)
   [ -n "$pid" ] || return 0
   logf="/tmp/claude-wake-hang-$(date +%Y%m%d-%H%M%S).log"
   {
-    echo "# claude-wake hang @ $(date)  pid=$pid  dir=${1:-?}"
+    echo "# claude-wake hang @ $(date)  sess=$s  pid=$pid"
     echo "## 子进程"; ps -axo pid,ppid,stat,command | awk -v p="$pid" '$2==p'
     echo "## sample 调用栈"; sample "$pid" 2 2>/dev/null
     echo "## lsof（连接/管道）"; lsof -nP -p "$pid" 2>/dev/null
@@ -143,46 +182,78 @@ dump_hang() {
 # 按【墙钟时间】判定（不是循环次数）——守护进程里 tmux 命令偶尔慢，按次数会判太晚。
 # 健康 claude 几秒就渲染 TUI；pane 空白持续 ${WAKE_HANG_BLANK}s = 冷启动卡死，早判→dump→reap→上层重试。
 WAKE_HANG_BLANK="${WAKE_HANG_BLANK:-12}"
+# 阻塞式（Shortcut/CLI 的 wake）用：盯一个会话的 pane 直到出 URL；失败/卡死只收掉【这一个】
+# （reap_one $id），不动其它并存会话。流式 SPA 不走这里（它由 server 端无超时轮询 list）。
 capture_url() {
-  local start=$SECONDS blank_since=$SECONDS pane url lines now
+  local id="$1" s start=$SECONDS blank_since=$SECONDS pane url lines now
+  s="$(sess "$id")"
   while [ $((SECONDS - start)) -lt "$WAKE_CAPTURE_TIMEOUT" ]; do
-    pane=$($T capture-pane -t "$WAKE_SESSION" -p 2>/dev/null || true)
+    pane=$($T capture-pane -t "$s" -p 2>/dev/null || true)
     printf '%s' "$pane" | grep -qiE 'remote.control failed|session creation failed' \
-      && { log "RC 注册失败 banner"; dump_hang "$1"; reap; return 1; }
+      && { log "RC 注册失败 banner"; dump_hang "$id"; reap_one "$id"; return 1; }
     url=$(printf '%s' "$pane" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1)
     [ -n "$url" ] && { printf '%s\n' "$url"; return 0; }
     lines=$(printf '%s' "$pane" | grep -c .)
     now=$SECONDS
     [ "$lines" -ge 2 ] && blank_since=$now   # 一渲染出内容就清零计时
     if [ $((now - blank_since)) -ge "$WAKE_HANG_BLANK" ]; then
-      log "pane 空白持续 $((now - blank_since))s → 判定冷启动卡死"; dump_hang "$1"; reap; return 1
+      log "pane 空白持续 $((now - blank_since))s → 判定冷启动卡死"; dump_hang "$id"; reap_one "$id"; return 1
     fi
     sleep 1
   done
-  log "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 URL"; dump_hang "$1"; reap; return 1
+  log "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 URL"; dump_hang "$id"; reap_one "$id"; return 1
 }
 
 case "${1:-wake}" in
   wake)
+    # 阻塞式（Shortcut/CLI）：起一个【独立】会话 + 等到 URL 打到 stdout；失败只收掉自己这一个，
+    # 不动别人。多会话模型：不再 reap 其它会话，重复调用会并存累积（由 list/UI 管理）。
     WDIR="${2:-$WAKE_DIR_DEFAULT}"
-    reap
-    # 单次尝试，不在一次请求里狂重试：之前的 3 次重试会把"没及时抓到 URL 的尝试"reap 掉，
-    # 每个都在云端留一个 archived 尸体，还容易 >60s 超时、列表里点错。改成只起一次——
-    # 成了打印 URL；真卡死（空白早判 ${WAKE_HANG_BLANK}s / 等满 ${WAKE_CAPTURE_TIMEOUT}s）就 reap+报错，
-    # 让 SPA 那头出「重试」按钮你手点一次（那时 host server 已暖、基本必成），不留尸体。
     spawn "$WDIR"
-    url="$(capture_url "$WDIR")" || die "没起来（已 reap，诊断见 /tmp/claude-wake-hang-*.log）。请重试一次。"
+    url="$(capture_url "$SESSION_ID")" \
+      || die "没起来（已收掉本次，诊断见 /tmp/claude-wake-hang-*.log）。请重试一次。"
     printf '%s\n' "$url"
     ;;
-  reap)   reap ;;
-  status)
-    if $T has-session -t "$WAKE_SESSION" 2>/dev/null; then
-      $T capture-pane -t "$WAKE_SESSION" -p 2>/dev/null \
-        | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1 \
-        || echo "wake session 在，但没抓到 URL"
-    else
-      echo "no wake session"
-    fi
+  # ---- 流式唤醒原子动作（server 编排无超时轮询）。多会话：全部按 <id> 寻址，互不影响 ----
+  #   spawn-bg [dir]   起一个独立会话立刻返回，回 id=/rc=/dir= 供 server 记账（不 reap 任何别人）。
+  #   peek  <id>       打印该会话 pane（server 据此判 booting/rendering/ready + 回终端尾巴）。
+  #   alive <id>       该会话还在不在（yes/no）。
+  #   list             列出所有 live 会话：每行 id<TAB>rc<TAB>dir（从 tmux 读，server 重启不丢）。
+  #   reap  <id> [rc]  精准收一个；reap（无 id）= reap-all 兜底。
+  #   reap-all         全部收掉（卸载用）。
+  spawn-bg)
+    WDIR="${2:-$WAKE_DIR_DEFAULT}"
+    spawn "$WDIR"
+    printf 'id=%s\n' "$SESSION_ID"
+    printf 'rc=%s\n' "$RC_NAME"
+    printf 'dir=%s\n' "$WDIR"
     ;;
-  *) die "用法: claude-wake.sh wake|reap|status [dir]" ;;
+  peek)   $T capture-pane -t "$(sess "${2:?用法: peek <id>}")" -p 2>/dev/null || true ;;
+  alive)  $T has-session -t "$(sess "${2:?用法: alive <id>}")" 2>/dev/null && echo yes || echo no ;;
+  list)
+    $T list-sessions -F '#{session_name}' 2>/dev/null | grep "^$WAKE_SESS_PREFIX" \
+      | while read -r s; do
+          id="${s#"$WAKE_SESS_PREFIX"}"
+          rc="$($T show-options -t "$s" -v @rc 2>/dev/null || true)"
+          dir="$($T show-options -t "$s" -v @dir 2>/dev/null || true)"
+          printf '%s\t%s\t%s\n' "$id" "$rc" "$dir"
+        done
+    ;;
+  reap)
+    if [ -n "${2:-}" ]; then reap_one "$2" "${3:-}"; else reap_all; fi
+    ;;
+  reap-all) reap_all ;;
+  status)
+    # 列出所有 live 会话的 URL（多会话）：每行 rc<TAB>dir<TAB>url。
+    n=0
+    while IFS=$'\t' read -r id rc dir; do
+      [ -n "$id" ] || continue
+      n=$((n + 1))
+      u="$($T capture-pane -t "$(sess "$id")" -p 2>/dev/null \
+            | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1)"
+      printf '%s\t%s\t%s\n' "$rc" "$dir" "${u:-(无URL)}"
+    done < <("$0" list)
+    [ "$n" -gt 0 ] || echo "no wake session"
+    ;;
+  *) die "用法: claude-wake.sh wake|spawn-bg|peek <id>|alive <id>|list|reap [id]|reap-all|status [dir]" ;;
 esac

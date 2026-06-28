@@ -22,8 +22,14 @@
   GET  /app [/...]            → Next + shadcn 静态导出 SPA（web/out）。入口 /app 鉴权+种 Cookie，
                                 /app/<资源> 公开。数据走下面 /api/*。
   GET  /api/browse [?path=]   → 目录 JSON（给 SPA）：{rel,crumb,parent,atRoot,dirs[],showHidden}。同样限根。
-  POST /api/wake [path=|dir=] → 同 POST /wake，但恒回 JSON {url}。path= 是相对根的路径。
-  GET  /status                → 当前 wake 会话的链接（若在）。无副作用。
+  POST /api/wake [path=|dir=] → 同 POST /wake，但恒回 JSON {url}（阻塞式，Shortcut/CLI 用）。
+  POST /api/wake/start        → 起一个【独立】会话【立刻返回】{job,rc,dir}，不阻塞、不等 URL。
+                                多会话：可并存任意多个，互不影响。
+  GET  /api/wake/sessions     → 所有 live 会话的实时状态数组：[{id,rc,dir,phase,elapsed,url,tail[]}]。
+                                phase：booting(冷启动)→rendering(注册 RC)→ready(拿到链接)；
+                                无超时——卡住就一直停在某 phase，由用户对那一个 kill。
+  POST /api/wake/kill?job=    → 精准收掉某一个会话（本地进程 + 注销云端登记），不动其它。
+  GET  /status                → 所有 live 会话的链接（多会话）。无副作用。
   GET  /health                → ok（不鉴权，给 tailscale/监控探活）。
 
 实际起会话的脏活全在 claude-wake.sh（WAKE_SH 指过去）。
@@ -33,8 +39,12 @@ import hmac
 import json
 import mimetypes
 import os
+import re
+import secrets
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -130,6 +140,75 @@ def run_wake(*args, timeout=60):
     return subprocess.run(
         [WAKE_SH, *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+# ---- 流式唤醒 job 台账 ----
+# 模型：POST /api/wake/start 起一个【后台】会话立刻返回 job_id（claude 留在 host server 里跑）；
+# 前端不断 GET /api/wake/poll?job= 拿"详细具体链路"（冷启动→TUI→注册 RC→拿到链接）+ 终端尾巴；
+# 没有超时——卡住就一直停在某 phase，由用户 POST /api/wake/kill?job= 远程收掉。
+# 进度全由 server 端轮询 wake.sh peek/alive 推断，wake.sh 只提供原子动作（见其 spawn-bg/peek/alive）。
+URL_RE = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_]+")
+# 记账：sid(=wake.sh 的 <id>) -> {dir, rc, started, url}。started 用于算 elapsed；url 一旦见过
+# 就记住（TUI 里链接会滚走，别让"就绪"又退回"注册中"）。server 重启会丢，但 wake.sh list 从
+# tmux 读才是 live 真相，丢的只是 elapsed/记忆 url，list_sessions 里会按需补登记。
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+JOBS_MAX = 24
+
+
+def register_job(sid, rc, d):
+    with JOBS_LOCK:
+        JOBS[sid] = {"dir": d, "rc": rc, "started": time.time(), "url": None}
+        if len(JOBS) > JOBS_MAX:  # 修剪最旧（started 可能为 None → 视作 0 排最前先删）
+            for old in sorted(JOBS, key=lambda k: JOBS[k]["started"] or 0)[:-JOBS_MAX]:
+                JOBS.pop(old, None)
+
+
+def classify(pane):
+    """据 pane 内容推断 phase + url + 终端尾巴。
+       booting(空白·冷启动中) → rendering(TUI 起来了·注册 RC 等 URL) → ready(拿到链接)；
+       failed = RC 注册失败 banner。只有 live 会话才会被分类（list 来自 tmux 在跑的会话）。"""
+    low = pane.lower()
+    m = URL_RE.search(pane)
+    lines = [ln for ln in pane.splitlines() if ln.strip()]
+    if m:
+        phase = "ready"
+    elif "session creation failed" in low or "remote control failed" in low:
+        phase = "failed"
+    elif len(lines) >= 2:
+        phase = "rendering"
+    else:
+        phase = "booting"
+    return phase, (m.group(0) if m else None), lines[-8:]
+
+
+def list_sessions():
+    """所有 live wake 会话的实时状态数组（给 SPA 列出、各自可 kill）。无超时——卡住就一直停在
+       某 phase，由用户对那一个点「收掉」。新的在上。"""
+    out = run_wake("list", timeout=10).stdout
+    res = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[0]:
+            continue
+        sid, rc, d = parts[0], parts[1], parts[2]
+        pane = run_wake("peek", sid, timeout=10).stdout
+        phase, url, tail = classify(pane)
+        with JOBS_LOCK:
+            j = JOBS.get(sid)
+            if j is None:  # server 重启后 / Shortcut 起的会话：补登记，以便记住 url
+                j = JOBS[sid] = {"dir": d, "rc": rc, "started": None, "url": None}
+            started, known = j["started"], j["url"]
+            if url:
+                j["url"] = url
+        if not url and known:  # URL 在 TUI 里滚走了，用记住的，别退回"注册中"
+            url, phase = known, "ready"
+        res.append({
+            "id": sid, "rc": rc, "dir": d, "phase": phase, "url": url, "tail": tail,
+            "elapsed": int(time.time() - started) if started else None,
+        })
+    res.sort(key=lambda x: (x["elapsed"] is None, -(x["elapsed"] or 0)))
+    return res
 
 
 PAGE_HEAD = (
@@ -289,6 +368,32 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         return auth[7:].strip() if auth.startswith("Bearer ") else ""
 
+    def _resolve_wake_dir(self, form, q):
+        """解析唤醒目标目录。SPA 传相对根的 path=；旧客户端（Shortcut/HTML 表单）传 dir=
+        （绝对路径或 /dirs 仓库名）。返回 (abs_dir, None)；abs_dir="" 表示用默认目录。
+        出错返回 (None, (code, body, ctype))，调用方直接 _send(*err)。"""
+        rel = form.get("path", [""])[0] or q.get("path", [""])[0]
+        d = form.get("dir", [""])[0] or q.get("dir", [""])[0]
+        if rel and not d:
+            abs_dir = resolve_in_root(rel)
+            if abs_dir is None:
+                return None, (400, json.dumps({"error": "bad path"}),
+                              "application/json; charset=utf-8")
+            return abs_dir, None
+        if d:
+            # 安全：绝对路径必须 realpath 后落在 BROWSE_ROOT 内（杜绝 dir=/etc 越界）；
+            # 否则当作 /dirs 仓库名解析。两者都不通过就拒。
+            if d.startswith("/"):
+                rd = os.path.realpath(d)
+                if not in_root(rd) or not os.path.isdir(rd):
+                    return None, (403, "dir outside root\n", "text/plain; charset=utf-8")
+                return rd, None
+            dd = list_project_dirs().get(d, "")
+            if not dd:
+                return None, (400, "unknown dir\n", "text/plain; charset=utf-8")
+            return dd, None
+        return "", None  # 没给 → 默认目录（wake.sh 用 WAKE_DIR_DEFAULT）
+
     # ---- GET：只读，绝不 spawn ----
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -310,6 +415,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/app":
             # SPA 入口：鉴权 + 顺带种 Cookie，之后 /api/* 靠 Cookie 同源放行
             return self._serve_web("index.html", cookie_tok=tok)
+        if path == "/api/wake/sessions":
+            return self._send(200, json.dumps(list_sessions(), ensure_ascii=False),
+                              "application/json; charset=utf-8",
+                              extra_headers=[self._cookie(tok)])
         if path == "/api/browse":
             target = resolve_in_root(q.get("path", [""])[0])
             if target is None:
@@ -357,37 +466,74 @@ class Handler(BaseHTTPRequestHandler):
         if not token_ok(tok):
             return self._send(401, "unauthorized\n", "text/plain; charset=utf-8")
 
+        # ---- 流式唤醒（SPA 用）：起会话立刻返回 job_id，前端轮询 /api/wake/poll 看链路 ----
+        if path == "/api/wake/start":
+            d, err = self._resolve_wake_dir(form, q)
+            if err:
+                return self._send(*err)
+            try:
+                r = run_wake("spawn-bg", *([d] if d else []), timeout=30)
+            except subprocess.TimeoutExpired:
+                return self._send(504, json.dumps({"error": "spawn 超时"}),
+                                  "application/json; charset=utf-8")
+            if r.returncode != 0:
+                # 最常见：host server 没在跑（应由登录项保活）→ wake.sh die 的原因在 stderr
+                return self._send(500, json.dumps({"error": r.stderr.strip() or "spawn 失败"}),
+                                  "application/json; charset=utf-8")
+            sid, rc, dd = "", "", d
+            for ln in r.stdout.splitlines():
+                if ln.startswith("id="):
+                    sid = ln[3:].strip()
+                elif ln.startswith("rc="):
+                    rc = ln[3:].strip()
+                elif ln.startswith("dir="):
+                    dd = ln[4:].strip()
+            register_job(sid, rc, dd)
+            return self._send(200, json.dumps({"job": sid, "rc": rc, "dir": dd}),
+                              "application/json; charset=utf-8")
+
+        # ---- 远程 kill：精准收掉【某一个】会话（本地进程 + 让 claude 注销云端登记），不动其它 ----
+        if path == "/api/wake/kill":
+            jid = form.get("job", [""])[0] or q.get("job", [""])[0]
+            rc = ""
+            with JOBS_LOCK:
+                j = JOBS.get(jid)
+                if j:
+                    rc = j.get("rc", "")
+            if jid:
+                try:
+                    run_wake("reap", jid, *([rc] if rc else []), timeout=20)
+                except subprocess.TimeoutExpired:
+                    pass
+                with JOBS_LOCK:
+                    JOBS.pop(jid, None)
+            return self._send(200, json.dumps({"ok": True}),
+                              "application/json; charset=utf-8")
+
+        # ---- 全部收掉：一键清空所有 live 会话（多会话攒多了时方便）----
+        if path == "/api/wake/reap-all":
+            try:
+                run_wake("reap-all", timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+            with JOBS_LOCK:
+                JOBS.clear()
+            return self._send(200, json.dumps({"ok": True}),
+                              "application/json; charset=utf-8")
+
         if path in ("/", "/wake", "/api/wake"):
-            # Shortcut / API / SPA 带 Accept: application/json（或 ?format=json，或走 /api/wake）→ 回 JSON
+            # Shortcut / API 带 Accept: application/json（或 ?format=json，或走 /api/wake）→ 回 JSON。
+            # 这是【阻塞式】老路径：起会话 + 等到 URL 一次性返回（45s 内）。Shortcut/CLI 用它；
+            # SPA 改走上面的 start/poll/kill 流式三件套。
             wants_json = (
                 path == "/api/wake"
                 or "application/json" in self.headers.get("Accept", "")
                 or q.get("format", [""])[0] == "json"
                 or form.get("format", [""])[0] == "json"
             )
-            # SPA 传相对路径 path=（相对 BROWSE_ROOT）；旧客户端传 dir=（绝对路径或 /dirs 仓库名）
-            rel = form.get("path", [""])[0] or q.get("path", [""])[0]
-            d = form.get("dir", [""])[0] or q.get("dir", [""])[0]
-            if rel and not d:
-                abs_dir = resolve_in_root(rel)
-                if abs_dir is None:
-                    return self._send(400, json.dumps({"error": "bad path"}),
-                                      "application/json; charset=utf-8")
-                d = abs_dir
-            elif d:
-                # 安全：绝对路径（/browse 表单给的）必须 realpath 后落在 BROWSE_ROOT 内；
-                # 否则当作 /dirs 仓库名解析。两者都不通过就拒绝——杜绝 dir=/etc 这类越界。
-                if d.startswith("/"):
-                    rd = os.path.realpath(d)
-                    if not in_root(rd) or not os.path.isdir(rd):
-                        return self._send(403, "dir outside root\n",
-                                          "text/plain; charset=utf-8")
-                    d = rd
-                else:
-                    d = list_project_dirs().get(d, "")
-                    if not d:
-                        return self._send(400, "unknown dir\n",
-                                          "text/plain; charset=utf-8")
+            d, err = self._resolve_wake_dir(form, q)
+            if err:
+                return self._send(*err)
             args = ["wake"] + ([d] if d else [])
             try:
                 out = run_wake(*args)
