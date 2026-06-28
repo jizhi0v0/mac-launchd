@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronRight,
-  ChevronUp,
   Circle,
   Cpu,
   ExternalLink,
@@ -412,32 +411,8 @@ export default function Page() {
 
         {/* 主区：Finder 列视图 */}
         <div className="min-w-0 flex-1">
+          {/* 顶栏只放操作：导航靠点列 + 底部路径栏，不再要「上级」 */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!path}
-              onClick={() => navigate(segs.slice(0, -1).join("/"))}
-            >
-              <ChevronUp /> 上级
-            </Button>
-            {/* 面包屑（同时是路径显示），任意层可点 */}
-            <nav className="bg-muted text-muted-foreground flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md px-2.5 py-1.5 text-xs whitespace-nowrap">
-              <button onClick={() => navigate("")} className="hover:text-foreground shrink-0">
-                ~
-              </button>
-              {segs.map((seg, i) => {
-                const target = segs.slice(0, i + 1).join("/");
-                return (
-                  <span key={target} className="flex shrink-0 items-center gap-1">
-                    <span className="opacity-40">/</span>
-                    <button onClick={() => navigate(target)} className="hover:text-foreground">
-                      {seg}
-                    </button>
-                  </span>
-                );
-              })}
-            </nav>
             <Button variant="outline" size="sm" onClick={reload} title="刷新">
               <RotateCw />
             </Button>
@@ -445,20 +420,19 @@ export default function Page() {
               {all ? <EyeOff /> : <Eye />}
               {all ? "隐藏点目录" : "显示隐藏"}
             </Button>
+            <div className="relative min-w-0 flex-1">
+              <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+              <input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="过滤各列…"
+                className="border-input bg-background focus-visible:ring-ring/50 h-9 w-full rounded-md border pr-3 pl-9 text-sm outline-none focus-visible:ring-[3px]"
+              />
+            </div>
             <Button size="sm" disabled={starting.has(".")} onClick={() => doWake(here, ".")}>
               {starting.has(".") ? <Loader2 className="animate-spin" /> : <Play />}
               在此唤醒
             </Button>
-          </div>
-
-          <div className="relative mb-3">
-            <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="过滤各列…"
-              className="border-input bg-background focus-visible:ring-ring/50 h-9 w-full rounded-md border pr-3 pl-9 text-sm outline-none focus-visible:ring-[3px]"
-            />
           </div>
 
           {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒 */}
@@ -527,6 +501,30 @@ export default function Page() {
               );
             })}
           </div>
+
+          {/* 底部路径栏（Finder 式）：当前聚焦路径，任意段可点跳转；末段=当前目录、不可点 */}
+          <nav className="cw-scroll bg-muted/40 text-muted-foreground mt-2 flex items-center gap-1 overflow-x-auto rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap">
+            <Folder className="size-3.5 shrink-0" />
+            <button onClick={() => navigate("")} className="hover:text-foreground shrink-0">
+              ~
+            </button>
+            {segs.map((seg, i) => {
+              const target = segs.slice(0, i + 1).join("/");
+              const last = i === segs.length - 1;
+              return (
+                <span key={target} className="flex shrink-0 items-center gap-1">
+                  <ChevronRight className="size-3 shrink-0 opacity-40" />
+                  {last ? (
+                    <span className="text-foreground font-medium">{seg}</span>
+                  ) : (
+                    <button onClick={() => navigate(target)} className="hover:text-foreground">
+                      {seg}
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </nav>
         </div>
       </div>
 
