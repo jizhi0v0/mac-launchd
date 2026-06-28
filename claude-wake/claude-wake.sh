@@ -47,9 +47,9 @@ mkdir -p "$WAKE_DIR_DEFAULT" 2>/dev/null || true
 WAKE_RC_TAG="${WAKE_RC_TAG:-wake}"
 WAKE_SESSION="${WAKE_SESSION:-wake}"
 WAKE_NO_PROXY="${WAKE_NO_PROXY:-localhost,127.0.0.1,::1,.local}"
-# 每次尝试等 URL 的上限（短！健康暖会话 ~5s 就出；超过即判这次失败→reap→重试下一次）。
-# 砍短是为了让 3 次重试塞进服务端 60s 超时内（冷启动首次必卡、第二次基本就成）。
-WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-18}"
+# 等 URL 的上限。放宽到 45s：别误杀"其实已注册 RC、只是 URL 慢一两拍"的好会话——
+# 误杀会在云端留一个 archived 尸体。真卡死由下面的"空白早判"快速识别，不靠这个超时。
+WAKE_CAPTURE_TIMEOUT="${WAKE_CAPTURE_TIMEOUT:-45}"
 
 # 根因修复：LaunchAgent 亲自起的 tmux server 处在 launchd bootstrap 上下文，里面 claude 卡死、
 # 连它的 tmux 客户端命令也卡。所以 wake 绝不自己起 server —— 只挂到一个【在 GUI 会话里起好的】
@@ -166,15 +166,13 @@ case "${1:-wake}" in
   wake)
     WDIR="${2:-$WAKE_DIR_DEFAULT}"
     reap
-    # 冷启动卡死 → 自动重试（reap 只杀会话不杀 tmux server，所以重试用的是已暖的 server，
-    # 第二次基本必成——这正是你说的"再跑就好"，做成对用户透明）。快判 ${WAKE_HANG_BLANK}s，
-    # 3 次也就 ~36s，容得下服务端 60s 超时。
-    for attempt in 1 2 3; do
-      spawn "$WDIR"
-      if url="$(capture_url "$WDIR")"; then printf '%s\n' "$url"; exit 0; fi
-      [ "$attempt" -lt 3 ] && log "第 $attempt 次没起来（已 reap），自动重试…"
-    done
-    die "连试三次都没起来（诊断见 /tmp/claude-wake-hang-*.log）"
+    # 单次尝试，不在一次请求里狂重试：之前的 3 次重试会把"没及时抓到 URL 的尝试"reap 掉，
+    # 每个都在云端留一个 archived 尸体，还容易 >60s 超时、列表里点错。改成只起一次——
+    # 成了打印 URL；真卡死（空白早判 ${WAKE_HANG_BLANK}s / 等满 ${WAKE_CAPTURE_TIMEOUT}s）就 reap+报错，
+    # 让 SPA 那头出「重试」按钮你手点一次（那时 host server 已暖、基本必成），不留尸体。
+    spawn "$WDIR"
+    url="$(capture_url "$WDIR")" || die "没起来（已 reap，诊断见 /tmp/claude-wake-hang-*.log）。请重试一次。"
+    printf '%s\n' "$url"
     ;;
   reap)   reap ;;
   status)
