@@ -322,6 +322,26 @@ def system_stats_cached():
         return data
 
 
+def initial_app_data(rel_raw, show_hidden=False):
+    """/app 首屏注入数据：当前路径各列内容 + 会话 + 负载。首帧即有数据、不闪「加载中」
+    （SSR 效果，但仍由 Python 出，不引 Node 运行时）。非法 p → 退回根。"""
+    abs_dir = resolve_in_root(rel_raw)
+    rel = "" if abs_dir is None or abs_dir == BROWSE_ROOT \
+        else os.path.relpath(abs_dir, BROWSE_ROOT)
+    segs = rel.split("/") if rel else []
+    cols = {}
+    for k in range(len(segs) + 1):  # 每个前缀一列（含根）
+        prefix = "/".join(segs[:k])
+        t = resolve_in_root(prefix)
+        if t is not None:
+            cols[prefix] = {"dirs": list_subdirs(t, show_hidden)}
+    return {
+        "path": rel,
+        "cols": cols,
+        "state": {"sessions": list_sessions_cached(), "stats": system_stats_cached()},
+    }
+
+
 # ---- SSE 状态推送：一个共享后台 poller 算 {sessions,stats}，变了才广播给所有 SSE 连接 ----
 # 关键：无论多少客户端/标签页，tmux 每秒最多被 dump 一次（共享 poller），而不是每个客户端各自
 # 轮询 —— 既减往返、又从根上杜绝之前的轮询雪崩。没人看（无 SSE 连接）时 poller 休眠、不碰 tmux。
@@ -500,6 +520,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _serve_app(self, tok, q):
+        """/app 入口：把首屏初始数据注入 HTML（window.__CW_INITIAL__），首帧即有内容、不闪加载。"""
+        target = os.path.join(WEB_OUT, "index.html")
+        try:
+            with open(target, "rb") as fp:
+                html_text = fp.read().decode("utf-8")
+        except OSError:
+            return self._send(404, "前端未构建（cd web && bun run build）\n",
+                              "text/plain; charset=utf-8")
+        try:
+            payload = json.dumps(initial_app_data(q.get("p", [""])[0]),
+                                 ensure_ascii=False).replace("<", "\\u003c")  # 防 </script> 逃逸
+            html_text = html_text.replace(
+                "</head>", f"<script>window.__CW_INITIAL__={payload}</script></head>", 1)
+        except Exception:
+            pass  # 注入失败就退回普通静态页（客户端照常自取数据，只是会闪一下）
+        b = html_text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.send_header("Cache-Control", "no-store")  # 入口不缓存：每次重新注入+种 Cookie
+        k, v = self._cookie(tok)
+        self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(b)
+
     def _serve_sse(self, tok):
         """SSE 长连接：连上先推一帧当前状态，之后 poller 检测到变化才推新帧；15s 没变就发心跳。
         引用计数客户端数——有人连 poller 才转、最后一个断开就休眠。"""
@@ -607,8 +653,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(401, "unauthorized\n", "text/plain; charset=utf-8")
 
         if path == "/app":
-            # SPA 入口：鉴权 + 顺带种 Cookie，之后 /api/* 靠 Cookie 同源放行
-            return self._serve_web("index.html", cookie_tok=tok)
+            # SPA 入口：鉴权 + 注入首屏数据(window.__CW_INITIAL__)首帧不闪 + 顺带种 Cookie
+            return self._serve_app(tok, q)
         if path == "/api/wake/sessions":
             return self._send(200, json.dumps(list_sessions_cached(), ensure_ascii=False),
                               "application/json; charset=utf-8",

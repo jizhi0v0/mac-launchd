@@ -83,7 +83,27 @@ export default function Page() {
   const [dark, setDark] = useState(true);
 
   useEffect(() => {
-    setPath(readPath());
+    // server 注入的首屏数据（window.__CW_INITIAL__）：直接拿来 seed 路径/各列/会话/负载，首帧即有
+    // 内容、不再闪「加载中」（SSR 效果）。拿不到就退回客户端自取（readPath + 各列各自 fetch）。
+    const init = (
+      window as unknown as {
+        __CW_INITIAL__?: {
+          path?: string;
+          cols?: Record<string, Col>;
+          state?: { sessions?: WakeSession[]; stats?: SysStats | null };
+        };
+      }
+    ).__CW_INITIAL__;
+    if (init) {
+      setPath(init.path ?? readPath());
+      if (init.cols) setCols(init.cols);
+      if (init.state) {
+        setPolled(init.state.sessions ?? []);
+        if (init.state.stats) setSys(init.state.stats);
+      }
+    } else {
+      setPath(readPath());
+    }
     const t = localStorage.getItem("cw-theme");
     if (t) {
       const d = t === "dark";
@@ -476,9 +496,12 @@ export default function Page() {
                       </Button>
                     </div>
                   ) : col?.dirs === undefined ? (
-                    <div className="text-muted-foreground flex items-center gap-2 p-3 text-sm">
-                      <Loader2 className="size-4 animate-spin" /> 加载中…
-                    </div>
+                    // 只在【主动 fetch 中】转圈；未取过（首屏静态 HTML / 注入前）留白，不闪 spinner
+                    col?.loading ? (
+                      <div className="text-muted-foreground flex items-center gap-2 p-3 text-sm">
+                        <Loader2 className="size-4 animate-spin" /> 加载中…
+                      </div>
+                    ) : null
                   ) : items.length === 0 ? (
                     <p className="text-muted-foreground p-3 text-xs">（空）</p>
                   ) : (
