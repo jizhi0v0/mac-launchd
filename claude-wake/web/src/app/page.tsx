@@ -30,7 +30,6 @@ import {
   wakeKill,
   wakeReapAll,
   wakeStart,
-  type BrowseData,
   type LiveState,
   type SysStats,
   type WakeSession,
@@ -66,13 +65,12 @@ function phaseMeta(p: WakeSession["phase"]) {
 }
 
 type Pending = { id: string; rc: string; dir: string; rel: string | null; started: number };
+type Col = { loading?: boolean; dirs?: string[]; error?: string };
 
 export default function Page() {
   const [path, setPath] = useState("");
   const [all, setAll] = useState(false);
-  const [data, setData] = useState<BrowseData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [cols, setCols] = useState<Record<string, Col>>({}); // 每个目录前缀的列内容（缓存）
   const [filter, setFilter] = useState("");
   const [polled, setPolled] = useState<WakeSession[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
@@ -81,7 +79,6 @@ export default function Page() {
   const [wakeErr, setWakeErr] = useState<string | null>(null);
   const [sys, setSys] = useState<SysStats | null>(null); // 机器负载
   const [dark, setDark] = useState(true);
-  const loadSeq = useRef(0);
 
   useEffect(() => {
     setPath(readPath());
@@ -96,21 +93,54 @@ export default function Page() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const load = useCallback((p: string, showAll: boolean) => {
-    // 抢占式序号：只让最新一次 browse 落地（深链接挂载会同时发根+深两个请求，谁后返回谁覆盖
-    // data，导致 data=根列表/path=深路径错配，点进去把根文件夹拼到深 path 后面 → bad path）。
-    const seq = ++loadSeq.current;
-    setLoading(true);
-    setError(null);
-    browse(p, showAll)
-      .then((d) => seq === loadSeq.current && setData(d))
-      .catch((e) => seq === loadSeq.current && setError(String(e?.message || e)))
-      .finally(() => seq === loadSeq.current && setLoading(false));
+  // ---- Finder 列视图的数据层：path 是"最深选中"，每个前缀一列，缺哪列拉哪列（缓存） ----
+  const segs = useMemo(() => (path ? path.split("/") : []), [path]);
+  const colPrefixes = useMemo(() => {
+    const out: string[] = [];
+    for (let k = 0; k <= segs.length; k++) out.push(segs.slice(0, k).join("/"));
+    return out; // ["", "Developer", "Developer/github", ...] —— 比 segs 多一列（最深目录的内容）
+  }, [segs]);
+
+  const colsRef = useRef(cols);
+  colsRef.current = cols; // 给下面 effect 读最新缓存，又不进依赖造成循环
+  const inflight = useRef<Set<string>>(new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const fetchCol = useCallback((prefix: string, showAll: boolean) => {
+    if (inflight.current.has(prefix)) return;
+    inflight.current.add(prefix);
+    setCols((c) => ({ ...c, [prefix]: { ...c[prefix], loading: true } }));
+    browse(prefix, showAll)
+      .then((d) => setCols((c) => ({ ...c, [prefix]: { dirs: d.dirs } })))
+      .catch((e) => setCols((c) => ({ ...c, [prefix]: { error: String(e?.message || e) } })))
+      .finally(() => inflight.current.delete(prefix));
   }, []);
 
+  // 拉缺失的列：深链接挂载会并行拉多列；逐层导航只新增最深一列（其余命中缓存）。
   useEffect(() => {
-    load(path, all);
-  }, [path, all, load]);
+    colPrefixes.forEach((p) => {
+      const cur = colsRef.current[p];
+      if (!cur || (cur.dirs === undefined && cur.error === undefined && !cur.loading)) {
+        fetchCol(p, all);
+      }
+    });
+  }, [colPrefixes, all, fetchCol]);
+
+  // 深入时把列容器横向滚到最右，露出新开的列。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [colPrefixes.length]);
+
+  const reload = useCallback(() => {
+    inflight.current.clear();
+    setCols({}); // 清缓存 → effect 重新拉当前各列
+  }, []);
+  const toggleAll = useCallback(() => {
+    inflight.current.clear();
+    setCols({}); // 显示/隐藏点目录变了，各列内容都变，清缓存重拉
+    setAll((v) => !v);
+  }, []);
 
   // 把一帧组合状态 {sessions,stats} 落到 UI；并撤掉已被服务端确认的乐观占位。
   const applyState = useCallback((st: LiveState) => {
@@ -167,7 +197,6 @@ export default function Page() {
         }
       };
       es.onerror = () => {
-        // EventSource 会自己重连；只有它彻底放弃（CLOSED）才退回轮询。
         if (es && es.readyState === EventSource.CLOSED && !stop) {
           clearTimeout(watchdog);
           es = null;
@@ -185,7 +214,6 @@ export default function Page() {
   }, [applyState, refreshOnce]);
 
   const navigate = useCallback((p: string) => {
-    setFilter("");
     const params = new URLSearchParams();
     if (p) params.set("p", p);
     const token = new URLSearchParams(window.location.search).get("token");
@@ -253,12 +281,6 @@ export default function Page() {
     localStorage.setItem("cw-theme", d ? "dark" : "light");
   };
 
-  const dirs = useMemo(() => {
-    const list = data?.dirs ?? [];
-    const f = filter.trim().toLowerCase();
-    return f ? list.filter((d) => d.toLowerCase().includes(f)) : list;
-  }, [data, filter]);
-
   const sessions = useMemo(() => {
     const map = new Map<string, WakeSession>();
     for (const p of pending)
@@ -287,9 +309,8 @@ export default function Page() {
     return [...m.values()];
   }, [sessions]);
 
-  // 子目录路径基于 data.rel（当前真正展示的列表所属路径），不用 path（可能是还在加载的目标）。
-  const here = data?.rel ?? "";
-  const child = (name: string) => (here ? `${here}/${name}` : name);
+  const here = path; // 当前聚焦目录 = 最深选中；在此唤醒 / 路径显示都用它
+  const f = filter.trim().toLowerCase();
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:py-10">
@@ -340,7 +361,6 @@ export default function Page() {
                 </button>
               )}
             </div>
-            {/* 起会话请求在飞、还没拿到 id 时的即时占位——别让点了之后左侧一片空白看着像没反应 */}
             {[...starting].map((key) => (
               <div
                 key={"starting-" + key}
@@ -371,11 +391,7 @@ export default function Page() {
                     disabled={starting.has("+" + g.dir)}
                     onClick={() => doWake(g.rel ?? "", "+" + g.dir)}
                   >
-                    {starting.has("+" + g.dir) ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Plus />
-                    )}
+                    {starting.has("+" + g.dir) ? <Loader2 className="animate-spin" /> : <Plus />}
                   </Button>
                 </div>
                 <div className="flex flex-col">
@@ -394,50 +410,38 @@ export default function Page() {
           </aside>
         )}
 
-        {/* 主区：文件浏览器 */}
+        {/* 主区：Finder 列视图 */}
         <div className="min-w-0 flex-1">
-          <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={!data || data.atRoot || loading}
-              onClick={() => data?.parent != null && navigate(data.parent)}
+              disabled={!path}
+              onClick={() => navigate(segs.slice(0, -1).join("/"))}
             >
               <ChevronUp /> 上级
             </Button>
+            {/* 面包屑（同时是路径显示），任意层可点 */}
             <nav className="bg-muted text-muted-foreground flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md px-2.5 py-1.5 text-xs whitespace-nowrap">
-              <button
-                onClick={() => navigate("")}
-                disabled={loading}
-                className="hover:text-foreground shrink-0 disabled:pointer-events-none"
-              >
+              <button onClick={() => navigate("")} className="hover:text-foreground shrink-0">
                 ~
               </button>
-              {(data?.rel ? data.rel.split("/") : []).map((seg, i, arr) => {
-                const target = arr.slice(0, i + 1).join("/");
-                const isLast = i === arr.length - 1;
+              {segs.map((seg, i) => {
+                const target = segs.slice(0, i + 1).join("/");
                 return (
                   <span key={target} className="flex shrink-0 items-center gap-1">
                     <span className="opacity-40">/</span>
-                    {isLast ? (
-                      <span className="text-foreground">{seg}</span>
-                    ) : (
-                      <button
-                        onClick={() => navigate(target)}
-                        disabled={loading}
-                        className="hover:text-foreground disabled:pointer-events-none"
-                      >
-                        {seg}
-                      </button>
-                    )}
+                    <button onClick={() => navigate(target)} className="hover:text-foreground">
+                      {seg}
+                    </button>
                   </span>
                 );
               })}
             </nav>
-            <Button variant="outline" size="sm" onClick={() => load(path, all)} title="刷新">
-              <RotateCw className={cn(loading && "animate-spin")} />
+            <Button variant="outline" size="sm" onClick={reload} title="刷新">
+              <RotateCw />
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setAll((v) => !v)}>
+            <Button variant="outline" size="sm" onClick={toggleAll}>
               {all ? <EyeOff /> : <Eye />}
               {all ? "隐藏点目录" : "显示隐藏"}
             </Button>
@@ -447,66 +451,81 @@ export default function Page() {
             </Button>
           </div>
 
-          <div className="relative mb-4">
+          <div className="relative mb-3">
             <Search className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="过滤当前目录…"
+              placeholder="过滤各列…"
               className="border-input bg-background focus-visible:ring-ring/50 h-9 w-full rounded-md border pr-3 pl-9 text-sm outline-none focus-visible:ring-[3px]"
             />
           </div>
 
-          {error ? (
-            <div className="border-destructive/40 text-destructive flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm">
-              <span className="min-w-0 break-words">{error}</span>
-              <Button variant="outline" size="sm" onClick={() => load(path, all)}>
-                <RotateCw /> 重试
-              </Button>
-            </div>
-          ) : loading && !data ? (
-            <div className="text-muted-foreground flex items-center gap-2 px-1 py-8 text-sm">
-              <Loader2 className="animate-spin" /> 加载中…
-            </div>
-          ) : dirs.length === 0 ? (
-            <p className="text-muted-foreground px-1 py-8 text-sm">（无子目录）</p>
-          ) : (
-            <div
-              className={cn(
-                "grid grid-cols-1 gap-2 sm:grid-cols-2",
-                loading && "pointer-events-none opacity-50",
-              )}
-            >
-              {dirs.map((name) => {
-                const cp = child(name);
-                const busy = starting.has(cp);
-                return (
-                  <div
-                    key={name}
-                    className="group bg-card hover:border-ring/60 flex items-center gap-1 rounded-lg border pr-1 transition-colors"
-                  >
-                    <button
-                      onClick={() => navigate(cp)}
-                      className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left text-sm"
-                    >
-                      <Folder className="text-muted-foreground size-4 shrink-0" />
-                      <span className="truncate">{name}</span>
-                    </button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-8 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                      disabled={busy}
-                      title={`在 ${name} 唤醒`}
-                      onClick={() => doWake(cp, cp)}
-                    >
-                      {busy ? <Loader2 className="animate-spin" /> : <Play />}
-                    </Button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒 */}
+          <div
+            ref={scrollRef}
+            className="bg-card flex max-h-[62vh] min-h-[16rem] divide-x overflow-x-auto rounded-lg border"
+          >
+            {colPrefixes.map((prefix, k) => {
+              const selected = segs[k]; // 本列里高亮的子目录（指向下一列）；最后一列无
+              const col = cols[prefix];
+              const items = (col?.dirs ?? []).filter((n) => !f || n.toLowerCase().includes(f));
+              return (
+                <div key={prefix || "~"} className="w-56 shrink-0 overflow-y-auto">
+                  {col?.error ? (
+                    <div className="text-destructive flex flex-col items-start gap-2 p-3 text-xs">
+                      <span className="break-words">{col.error}</span>
+                      <Button variant="outline" size="sm" onClick={() => fetchCol(prefix, all)}>
+                        <RotateCw /> 重试
+                      </Button>
+                    </div>
+                  ) : col?.dirs === undefined ? (
+                    <div className="text-muted-foreground flex items-center gap-2 p-3 text-sm">
+                      <Loader2 className="size-4 animate-spin" /> 加载中…
+                    </div>
+                  ) : items.length === 0 ? (
+                    <p className="text-muted-foreground p-3 text-xs">（空）</p>
+                  ) : (
+                    items.map((name) => {
+                      const childPath = prefix ? `${prefix}/${name}` : name;
+                      const isSel = name === selected;
+                      const busy = starting.has(childPath);
+                      return (
+                        <div
+                          key={name}
+                          className={cn(
+                            "group flex items-center pr-1",
+                            isSel
+                              ? "bg-accent text-accent-foreground"
+                              : "hover:bg-muted/60",
+                          )}
+                        >
+                          <button
+                            onClick={() => navigate(childPath)}
+                            className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left text-sm"
+                          >
+                            <Folder className="text-muted-foreground size-4 shrink-0" />
+                            <span className="truncate">{name}</span>
+                          </button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="hidden size-6 shrink-0 group-hover:flex"
+                            disabled={busy}
+                            title={`在 ${name} 唤醒`}
+                            onClick={() => doWake(childPath, childPath)}
+                          >
+                            {busy ? <Loader2 className="animate-spin" /> : <Play />}
+                          </Button>
+                          <ChevronRight className="text-muted-foreground/40 size-3.5 shrink-0 group-hover:hidden" />
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -534,10 +553,7 @@ function StatBar({ sys }: { sys: SysStats }) {
       <span className="flex items-center gap-1" title={`load ${sys.load1} · ${sys.ncpu} 核`}>
         <Cpu className="size-3.5" /> {sys.loadPerCpu}×
       </span>
-      <span
-        className="flex items-center gap-1"
-        title={`${sys.memUsedMB} / ${sys.memTotalMB} MB`}
-      >
+      <span className="flex items-center gap-1" title={`${sys.memUsedMB} / ${sys.memTotalMB} MB`}>
         <MemoryStick className="size-3.5" /> {sys.memUsedPct}%
       </span>
       {sys.swapUsedMB > 1024 && (
