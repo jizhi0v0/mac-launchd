@@ -110,17 +110,20 @@ spawn() {
 }
 
 # 盯 pane 直到出现 claude.ai/code 接管链接；看到失败 banner 立即报错。
+# 失败（注册失败 / 超时）时先 reap 掉这个起不来的会话，别让它（偶发卡死那种空白 claude）
+# 一直挂着空占资源/RC 槽，要等下次 wake 才被收。
 capture_url() {
   local i pane url
   for i in $(seq 1 "$WAKE_CAPTURE_TIMEOUT"); do
     pane=$(tmux capture-pane -t "$WAKE_SESSION" -p 2>/dev/null || true)
     printf '%s' "$pane" | grep -qiE 'remote.control failed|session creation failed' \
-      && die "RC 注册失败（见 claude 调试日志 ~/.claude/logs）"
+      && { reap; die "RC 注册失败（见 claude 调试日志 ~/.claude/logs）"; }
     url=$(printf '%s' "$pane" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_]+' | head -1)
     [ -n "$url" ] && { printf '%s\n' "$url"; return 0; }
     sleep 1
   done
-  die "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 session URL"
+  reap
+  die "等了 ${WAKE_CAPTURE_TIMEOUT}s 没拿到 session URL（已 reap）"
 }
 
 case "${1:-wake}" in
