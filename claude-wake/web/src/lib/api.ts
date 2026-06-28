@@ -116,6 +116,7 @@ export type SysStats = {
   memUsedPct: number;
   swapUsedMB: number;
   busy: boolean; // server 综合判定：负载高/在换页/内存满
+  root: string; // 浏览根的绝对路径（拼完整路径用）
 };
 
 export async function stats(): Promise<SysStats> {

@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Check,
   CheckCircle2,
   ChevronRight,
   Circle,
+  Copy,
   Cpu,
   ExternalLink,
   Eye,
@@ -77,6 +79,7 @@ export default function Page() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [wakeErr, setWakeErr] = useState<string | null>(null);
   const [sys, setSys] = useState<SysStats | null>(null); // 机器负载
+  const [copied, setCopied] = useState(false); // 复制路径反馈
   const [dark, setDark] = useState(true);
 
   useEffect(() => {
@@ -310,6 +313,17 @@ export default function Page() {
 
   const here = path; // 当前聚焦目录 = 最深选中；在此唤醒 / 路径显示都用它
   const f = filter.trim().toLowerCase();
+  // 完整绝对路径（root 来自 server；拿不到就退回 ~ 形式，照样可粘贴进 shell）
+  const fullPath = path ? `${sys?.root ?? "~"}/${path}` : (sys?.root ?? "~");
+  const copyPath = useCallback(() => {
+    navigator.clipboard
+      ?.writeText(fullPath)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  }, [fullPath]);
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:py-10">
@@ -438,15 +452,22 @@ export default function Page() {
           {/* Finder 列视图（Miller columns）：每层一列，点文件夹右侧开新列；▶ 悬停在该目录唤醒 */}
           <div
             ref={scrollRef}
-            className="cw-scroll bg-card flex h-[62vh] divide-x overflow-x-auto rounded-lg border"
+            className="cw-scroll bg-card flex h-[62vh] overflow-x-auto rounded-lg border"
           >
             {colPrefixes.map((prefix, k) => {
               const selected = segs[k]; // 本列里高亮的子目录（指向下一列）；最后一列无
               const col = cols[prefix];
               const items = (col?.dirs ?? []).filter((n) => !f || n.toLowerCase().includes(f));
               return (
-                // 固定容器高度 + flex 默认 align-stretch → 每列撑满全高，列间分割线整条到底（短内容也有线）
-                <div key={prefix || "~"} className="cw-scroll w-56 shrink-0 overflow-y-auto">
+                // 固定容器高度 + flex 默认 align-stretch → 每列撑满全高；显式 border-r（不靠 divide-x，
+                // 它在这套 Tailwind v4 配置下没渲染出竖线）让列间分割线整条到底，短内容也有线。
+                <div
+                  key={prefix || "~"}
+                  className={cn(
+                    "cw-scroll w-56 shrink-0 overflow-y-auto",
+                    k < colPrefixes.length - 1 && "border-r",
+                  )}
+                >
                   {col?.error ? (
                     <div className="text-destructive flex flex-col items-start gap-2 p-3 text-xs">
                       <span className="break-words">{col.error}</span>
@@ -502,29 +523,41 @@ export default function Page() {
             })}
           </div>
 
-          {/* 底部路径栏（Finder 式）：当前聚焦路径，任意段可点跳转；末段=当前目录、不可点 */}
-          <nav className="cw-scroll bg-muted/40 text-muted-foreground mt-2 flex items-center gap-1 overflow-x-auto rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap">
-            <Folder className="size-3.5 shrink-0" />
-            <button onClick={() => navigate("")} className="hover:text-foreground shrink-0">
-              ~
-            </button>
-            {segs.map((seg, i) => {
-              const target = segs.slice(0, i + 1).join("/");
-              const last = i === segs.length - 1;
-              return (
-                <span key={target} className="flex shrink-0 items-center gap-1">
-                  <ChevronRight className="size-3 shrink-0 opacity-40" />
-                  {last ? (
-                    <span className="text-foreground font-medium">{seg}</span>
-                  ) : (
-                    <button onClick={() => navigate(target)} className="hover:text-foreground">
-                      {seg}
-                    </button>
-                  )}
-                </span>
-              );
-            })}
-          </nav>
+          {/* 底部路径栏（Finder 式）：左侧面包屑任意段可点跳转，右侧一键复制完整绝对路径 */}
+          <div className="mt-2 flex items-stretch gap-2">
+            <nav className="cw-scroll bg-muted/40 text-muted-foreground flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md border px-2.5 py-1.5 text-xs whitespace-nowrap">
+              <Folder className="size-3.5 shrink-0" />
+              <button onClick={() => navigate("")} className="hover:text-foreground shrink-0">
+                ~
+              </button>
+              {segs.map((seg, i) => {
+                const target = segs.slice(0, i + 1).join("/");
+                const last = i === segs.length - 1;
+                return (
+                  <span key={target} className="flex shrink-0 items-center gap-1">
+                    <ChevronRight className="size-3 shrink-0 opacity-40" />
+                    {last ? (
+                      <span className="text-foreground font-medium">{seg}</span>
+                    ) : (
+                      <button onClick={() => navigate(target)} className="hover:text-foreground">
+                        {seg}
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+            </nav>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={copyPath}
+              title={`复制完整路径：${fullPath}`}
+            >
+              {copied ? <Check className="text-green-500" /> : <Copy />}
+              {copied ? "已复制" : "复制路径"}
+            </Button>
+          </div>
         </div>
       </div>
 

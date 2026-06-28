@@ -305,6 +305,7 @@ def system_stats():
         "memUsedPct": mem_pct, "swapUsedMB": round(swap_used),
         # 提醒阈值：每核负载 > 1.5（CPU 已排队）或 swap > 2G（在换页）或内存 > 90%
         "busy": load_per_cpu > 1.5 or swap_used > 2048 or mem_pct > 90,
+        "root": BROWSE_ROOT,  # 浏览根的绝对路径，给前端拼"复制完整路径"
     }
 
 
