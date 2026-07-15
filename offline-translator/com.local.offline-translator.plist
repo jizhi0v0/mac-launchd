@@ -21,9 +21,17 @@
         <string>8110</string>
         <string>--log-level</string>
         <string>WARNING</string>
+        <!-- 必须显式给 --prompt-cache-bytes：不给的话 server.py 的裁剪分支
+             (if cli_args.prompt_cache_bytes is not None) 整个不进，KV cache 的
+             max_bytes 就停在默认 1<<63 = 无上限。--prompt-cache-size 只限「最多 10 个
+             cache」，不限每个多大。本模型 max_position_embeddings=262144，KV 64KB/token，
+             单个 cache 跑满 256k 上下文就是 16GB(实测进程涨到 17GB、峰值 20GB)。
+             2G ≈ 32k tokens 的 KV，翻译分段远用不到，够覆盖复用。 -->
+        <string>--prompt-cache-bytes</string>
+        <string>2G</string>
     </array>
 
-    <!-- 中性 model id "Hy-MT2-1.8B"：实为软链，指向当前量化目录(现 Hy-MT2-1.8B-mlx-8bit)。
+    <!-- 中性 model id "Hy-MT2-1.8B"：实为软链，指向当前量化目录(现 Hy-MT2-1.8B-mlx-4bit)。
          相对 --model + WorkingDirectory 让注册 id 干净、跨机器通用；与量化解耦——
          以后换 4bit/8bit 只改软链指向，客户端(Bob/扩展)的 model 字段不用动。 -->
     <key>WorkingDirectory</key>
