@@ -26,9 +26,14 @@
              max_bytes 就停在默认 1<<63 = 无上限。--prompt-cache-size 只限「最多 10 个
              cache」，不限每个多大。本模型 max_position_embeddings=262144，KV 64KB/token，
              单个 cache 跑满 256k 上下文就是 16GB(实测进程涨到 17GB、峰值 20GB)。
-             2G ≈ 32k tokens 的 KV，翻译分段远用不到，够覆盖复用。 -->
+
+             512M ≈ 8k tokens 的 KV。翻译是每段独立文本，共享前缀顶多一个短
+             system prompt，prompt cache 复用率≈0——实测 2G vs 256M：稳态
+             1891MB vs 1675MB，延迟 2.01s vs 1.77s(不降反略快)，即缩小无代价。
+             真实负载 cache 只用到 ~300MB，这个上限平时根本碰不到；它防的是尾部
+             ——有人翻超长文档时单个 KV cache 失控。512M 留了点余地。 -->
         <string>--prompt-cache-bytes</string>
-        <string>2G</string>
+        <string>512M</string>
     </array>
 
     <!-- 中性 model id "Hy-MT2-1.8B"：实为软链，指向当前量化目录(现 Hy-MT2-1.8B-mlx-4bit)。
